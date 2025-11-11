@@ -1,147 +1,74 @@
 import streamlit as st
 import os
-import shutil
+import json
+import time
 from datetime import datetime, timedelta
-import random
-import string
+import shutil
 
-# --- Configuration ---
+# ---------------- CONFIG ----------------
 UPLOAD_FOLDER = "submissions"
-if not os.path.exists(UPLOAD_FOLDER):
-    os.makedirs(UPLOAD_FOLDER)
+TEACHER_FILE = "teachers.json"
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# --- Initialize Session State ---
-if "logged_in" not in st.session_state:
-    st.session_state.logged_in = False
-if "teacher" not in st.session_state:
-    st.session_state.teacher = None
-if "passcode" not in st.session_state:
-    st.session_state.passcode = None
-if "upload_allowed" not in st.session_state:
-    st.session_state.upload_allowed = True
-if "exam_deadline" not in st.session_state:
-    st.session_state.exam_deadline = None
+# Load teacher data
+if os.path.exists(TEACHER_FILE):
+    with open(TEACHER_FILE, "r") as f:
+        teachers = json.load(f)
+else:
+    teachers = {}
+    with open(TEACHER_FILE, "w") as f:
+        json.dump(teachers, f)
 
-# --- Registered Teachers ---
-teachers = {
-    "ali": "1234",
-    "ahmad": "abcd"
-}
-
-# --- Helper Functions ---
-def generate_passcode():
-    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
-
-def remaining_time():
-    if st.session_state.exam_deadline:
-        remaining = st.session_state.exam_deadline - datetime.now()
-        if remaining.total_seconds() > 0:
-            return str(remaining).split(".")[0]
-        else:
-            return "⏰ Time Over"
-    return "Not set"
-
-# --- Main Title ---
-st.title("📘 SZABIST Exam Portal")
+# ---------------- APP TITLE ----------------
+st.title("📘 SZABIST Exam Portal (Official)")
 
 menu = st.sidebar.radio("Select User Type", ["Student", "Teacher"])
 
 # ---------------- STUDENT SECTION ----------------
 if menu == "Student":
     st.header("🧑‍🎓 Student Upload Portal")
-    student_id = st.text_input("Enter your Student ID:")
-    entered_passcode = st.text_input("Enter Passcode (provided by teacher):")
-    uploaded_file = st.file_uploader("Upload your exam file:", type=["pdf", "docx"])
 
-    if st.session_state.exam_deadline:
-        st.info(f"⏳ Remaining Time: {remaining_time()}")
+    teacher_usernames = list(teachers.keys())
+    if teacher_usernames:
+        selected_teacher = st.selectbox("Select Your Teacher", teacher_usernames)
+        passcode = st.text_input("Enter Passcode (Provided by Teacher):")
 
-    if st.button("Submit Paper"):
-        if not st.session_state.upload_allowed:
-            st.warning("🚫 Uploads are currently disabled by the teacher.")
-        elif st.session_state.exam_deadline and datetime.now() > st.session_state.exam_deadline:
-            st.error("⏰ Exam time is over. Submission closed.")
-        elif entered_passcode != st.session_state.passcode:
-            st.error("❌ Invalid passcode.")
-        elif student_id and uploaded_file:
-            student_folder = os.path.join(UPLOAD_FOLDER, student_id)
-            os.makedirs(student_folder, exist_ok=True)
-            file_path = os.path.join(student_folder, uploaded_file.name)
-            with open(file_path, "wb") as f:
-                f.write(uploaded_file.getbuffer())
-            st.success(f"✅ Paper uploaded successfully at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        else:
-            st.warning("⚠️ Please enter your ID and upload your file.")
+        if selected_teacher in teachers:
+            teacher_data = teachers[selected_teacher]
+            allowed = teacher_data.get("uploads_allowed", True)
+            deadline = teacher_data.get("exam_deadline")
+            lab = teacher_data.get("lab")
 
-# ---------------- TEACHER SECTION ----------------
-elif menu == "Teacher":
-    if not st.session_state.logged_in:
-        st.header("👩‍🏫 Teacher Login")
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
+            if deadline:
+                deadline_time = datetime.fromisoformat(deadline)
+                remaining = (deadline_time - datetime.now()).total_seconds()
+                if remaining > 0:
+                    st.info(f"⏳ Time remaining: {int(remaining // 60)} minutes")
+                else:
+                    st.error("⏰ Exam time is over. You can’t upload now.")
+                    allowed = False
 
-        if st.button("Login"):
-            if username in teachers and teachers[username] == password:
-                st.session_state.logged_in = True
-                st.session_state.teacher = username
-                st.success(f"✅ Welcome, {username.capitalize()}!")
-            else:
-                st.error("❌ Invalid username or password")
+            if allowed:
+                if passcode == teacher_data.get("passcode"):
+                    student_id = st.text_input("Enter your Student ID:")
+                    uploaded_file = st.file_uploader("Upload your Exam File (PDF or DOCX):", type=["pdf", "docx"])
 
-        st.caption("Forgot password? Contact admin for reset.")
-        st.caption("New teacher? Contact admin to register your account.")
+                    if st.button("Submit Paper"):
+                        if student_id and uploaded_file:
+                            lab_folder = os.path.join(UPLOAD_FOLDER, lab)
+                            os.makedirs(lab_folder, exist_ok=True)
 
-    else:
-        st.header(f"👋 Welcome, {st.session_state.teacher.capitalize()}")
-        if st.button("🚪 Logout"):
-            st.session_state.logged_in = False
-            st.session_state.teacher = None
-            st.session_state.passcode = None
-            st.session_state.exam_deadline = None
-            st.experimental_rerun()
+                            student_folder = os.path.join(lab_folder, student_id)
+                            os.makedirs(student_folder, exist_ok=True)
 
-        st.subheader("📂 Exam Controls")
+                            # Add serial number
+                            all_files = os.listdir(lab_folder)
+                            serial = len(all_files) + 1
+                            file_path = os.path.join(student_folder, f"{serial}_{uploaded_file.name}")
 
-        lab_name = st.text_input("Enter Lab Name (e.g. Lab1, Lab2):")
+                            with open(file_path, "wb") as f:
+                                f.write(uploaded_file.getbuffer())
 
-        if st.button("Generate Passcode"):
-            st.session_state.passcode = generate_passcode()
-            st.success(f"🧾 Passcode for students: **{st.session_state.passcode}**")
-
-        st.subheader("⏰ Exam Timing Control")
-        duration = st.number_input("Set Exam Duration (in minutes):", min_value=5, max_value=180, step=5)
-        if st.button("Start Exam Timer"):
-            st.session_state.exam_deadline = datetime.now() + timedelta(minutes=duration)
-            st.success(f"⏱️ Exam time started for {duration} minutes!")
-
-        if st.button("Extend Time by 10 Minutes"):
-            if st.session_state.exam_deadline:
-                st.session_state.exam_deadline += timedelta(minutes=10)
-                st.info("⏳ Time extended by 10 minutes.")
-            else:
-                st.warning("⚠️ Exam not started yet.")
-
-        st.subheader("📤 Upload Permissions")
-        if st.button("Allow Uploads"):
-            st.session_state.upload_allowed = True
-            st.success("✅ Uploads enabled for all students.")
-        if st.button("Disable Uploads"):
-            st.session_state.upload_allowed = False
-            st.warning("🚫 Uploads disabled.")
-
-        st.subheader("📁 View Student Submissions")
-        if lab_name:
-            if os.path.exists(UPLOAD_FOLDER):
-                all_students = os.listdir(UPLOAD_FOLDER)
-                st.write(f"**Total Files Submitted:** {len(all_students)}")
-                for i, student in enumerate(all_students, start=1):
-                    files = os.listdir(os.path.join(UPLOAD_FOLDER, student))
-                    st.write(f"{i}. **{student}** → {', '.join(files)}")
-            else:
-                st.info("No submissions yet.")
-
-        st.subheader("📦 Backup")
-        if st.button("Copy All Files to Backup Folder"):
-            backup_folder = "backup_" + datetime.now().strftime("%Y%m%d_%H%M%S")
-            shutil.copytree(UPLOAD_FOLDER, backup_folder)
-            st.success(f"✅ All files copied to '{backup_folder}'")
+                            st.success(f"✅ Paper uploaded successfully (Serial #{serial}) at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                        else:
+                            st.warning("⚠️ Please fill all fields a
