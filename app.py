@@ -13,7 +13,6 @@ import hashlib
 
 # ---------------- CONFIG ----------------
 APP_DATA = "app_data"
-ADMINS_FILE = os.path.join(APP_DATA, "admins.json")
 TEACHERS_FILE = os.path.join(APP_DATA, "teachers.json")
 SUBMISSIONS_ROOT = os.path.join(APP_DATA, "submissions")
 LOG_FILE = os.path.join(APP_DATA, "activity.log")
@@ -91,17 +90,11 @@ def walk_lab_files(lab_folder):
     return files_list
 
 # ---------------- SESSION STATE INIT ----------------
-if 'admins' not in st.session_state:
-    st.session_state.admins = load_json(ADMINS_FILE, {})
-
 if 'teachers' not in st.session_state:
     st.session_state.teachers = load_json(TEACHERS_FILE, {})
 
 if 'logged_in_user' not in st.session_state:
     st.session_state.logged_in_user = None
-
-if 'logged_in_role' not in st.session_state:
-    st.session_state.logged_in_role = None  # 'admin' or 'teacher'
 
 if 'active_passcodes' not in st.session_state:
     st.session_state.active_passcodes = {}
@@ -113,19 +106,17 @@ if 'rerun_flag' not in st.session_state:
     st.session_state.rerun_flag = False
 
 # ---------------- APP CONFIG ----------------
-st.set_page_config(page_title="Professional Lab Exam Portal", layout="centered")
-st.title("📘 Professional Lab Exam Portal")
+st.set_page_config(page_title="Lab Exam Portal", layout="centered")
+st.title("📘 Lab Exam Portal")
 
 # ---------------- AUTH HELPERS ----------------
 def logout():
     st.session_state.logged_in_user = None
-    st.session_state.logged_in_role = None
     st.session_state.rerun_flag = True
 
 def log(action):
     user = st.session_state.logged_in_user or "Unknown"
-    role = st.session_state.logged_in_role or "Unknown"
-    record_log(f"{role.upper()} {user}: {action}")
+    record_log(f"TEACHER {user}: {action}")
 
 def rerun_if_flagged():
     return st.session_state.get('rerun_flag', False)
@@ -144,101 +135,77 @@ def send_otp(user_contact):
 def verify_otp(user_contact, entered_otp):
     real_otp = st.session_state.otp_store.get(user_contact)
     if real_otp and entered_otp == real_otp:
-        del st.session_state.otp_store[user_contact]  # Consume OTP
+        del st.session_state.otp_store[user_contact]
         return True
     return False
 
-# ---------------- USER MANAGEMENT ----------------
-def register_user(user_type):
-    st.header(f"🔑 Register New {user_type.capitalize()}")
-    username = st.text_input(f"{user_type.capitalize()} Username", key=f"reg_{user_type}_username")
-    password = st.text_input("Password", type="password", key=f"reg_{user_type}_password")
-    password_confirm = st.text_input("Confirm Password", type="password", key=f"reg_{user_type}_password_confirm")
+# ---------------- TEACHER USER MANAGEMENT ----------------
+def register_teacher():
+    st.header("🔑 Register New Teacher")
+    username = st.text_input("Username", key="reg_teacher_username")
+    password = st.text_input("Password", type="password", key="reg_teacher_password")
+    password_confirm = st.text_input("Confirm Password", type="password", key="reg_teacher_password_confirm")
+    name = st.text_input("Full Name", key="reg_teacher_name")
+    phone = st.text_input("Phone (for OTP verification)", key="reg_teacher_phone")
+    lab = st.text_input("Assigned Lab Name", key="reg_teacher_lab")
 
-    # Additional fields for teacher
-    if user_type == "teacher":
-        name = st.text_input("Full Name", key="reg_teacher_name")
-        phone = st.text_input("Phone (for OTP verification)", key="reg_teacher_phone")
-        lab = st.text_input("Assigned Lab Name", key="reg_teacher_lab")
-
-    if st.button(f"Register {user_type.capitalize()}"):
-        if not username or not password:
-            st.warning("Username and password are required.")
+    if st.button("Register Teacher"):
+        if not username or not password or not name or not lab:
+            st.warning("Please fill all fields.")
             return
         if password != password_confirm:
             st.warning("Passwords do not match.")
             return
-        store = st.session_state.admins if user_type == "admin" else st.session_state.teachers
-        if username in store:
-            st.warning(f"{user_type.capitalize()} username already exists.")
+        if username in st.session_state.teachers:
+            st.warning("Username already exists.")
             return
-
-        # Validate teacher extra fields
-        if user_type == "teacher" and (not name or not lab):
-            st.warning("Please fill all teacher details.")
-            return
-
         hashed = hash_password(password)
-        if user_type == "admin":
-            store[username] = {"password_hash": hashed}
-            save_json(ADMINS_FILE, store)
-        else:
-            store[username] = {
-                "password_hash": hashed,
-                "name": name,
-                "phone": phone,
-                "lab": lab,
-                "uploads_allowed": True,
-                "exam_start": None,
-                "exam_end": None,
-            }
-            save_json(TEACHERS_FILE, store)
-
-        record_log(f"Registered new {user_type}: {username}")
-        st.success(f"{user_type.capitalize()} registered successfully! Please login.")
+        st.session_state.teachers[username] = {
+            "password_hash": hashed,
+            "name": name,
+            "phone": phone,
+            "lab": lab,
+            "uploads_allowed": True,
+            "exam_start": None,
+            "exam_end": None,
+        }
+        save_json(TEACHERS_FILE, st.session_state.teachers)
+        log(f"Registered new teacher {username}")
+        st.success("Teacher registered successfully! Please login.")
         st.session_state.rerun_flag = True
 
-def login_user(user_type):
-    st.header(f"🔒 {user_type.capitalize()} Login")
-    username = st.text_input(f"{user_type.capitalize()} Username", key=f"login_{user_type}_username")
-    password = st.text_input("Password", type="password", key=f"login_{user_type}_password")
+def login_teacher():
+    st.header("🔒 Teacher Login")
+    username = st.text_input("Username", key="login_teacher_username")
+    password = st.text_input("Password", type="password", key="login_teacher_password")
 
-    if st.button(f"Login {user_type.capitalize()}"):
-        store = st.session_state.admins if user_type == "admin" else st.session_state.teachers
-        user = store.get(username)
+    if st.button("Login"):
+        user = st.session_state.teachers.get(username)
         if not user:
-            st.error(f"{user_type.capitalize()} not found.")
+            st.error("Teacher not found.")
             return
         if verify_password(password, user["password_hash"]):
             st.session_state.logged_in_user = username
-            st.session_state.logged_in_role = user_type
-            record_log(f"{user_type.capitalize()} logged in: {username}")
+            log("Logged in")
             st.session_state.rerun_flag = True
         else:
             st.error("Invalid password.")
 
-def forgot_password_flow(user_type):
-    st.header(f"🔐 Forgot {user_type.capitalize()} Password")
-    username = st.text_input(f"Enter your {user_type} username", key=f"forgot_{user_type}_username")
-    store = st.session_state.admins if user_type == "admin" else st.session_state.teachers
-
-    if username and username not in store:
-        st.error(f"{user_type.capitalize()} username not found.")
+def forgot_teacher_password():
+    st.header("🔐 Forgot Password")
+    username = st.text_input("Enter your username", key="forgot_teacher_username")
+    if username and username not in st.session_state.teachers:
+        st.error("Username not found.")
         return
-
-    # Use phone for teachers, username for admins as contact info for OTP
-    contact_info = username if user_type == "admin" else store.get(username, {}).get("phone", "")
+    contact_info = st.session_state.teachers.get(username, {}).get("phone", "")
     if not contact_info and username:
-        st.error("No contact info available to send OTP.")
+        st.error("No phone number found to send OTP.")
         return
-
     if st.button("Send OTP"):
         send_otp(contact_info)
-
-    otp_input = st.text_input("Enter OTP", key=f"forgot_{user_type}_otp")
-    new_pass = st.text_input("Enter New Password", type="password", key=f"forgot_{user_type}_newpass")
-    confirm_pass = st.text_input("Confirm New Password", type="password", key=f"forgot_{user_type}_confirmpass")
-
+    otp_input = st.text_input("Enter OTP", key="forgot_teacher_otp")
+    new_pass = st.text_input("New Password", type="password", key="forgot_teacher_newpass")
+    confirm_pass = st.text_input("Confirm New Password", type="password", key="forgot_teacher_confirmpass")
     if st.button("Reset Password"):
         if not otp_input or not new_pass or not confirm_pass:
             st.warning("Fill all fields.")
@@ -247,13 +214,10 @@ def forgot_password_flow(user_type):
             st.warning("Passwords do not match.")
             return
         if verify_otp(contact_info, otp_input):
-            store[username]["password_hash"] = hash_password(new_pass)
-            if user_type == "admin":
-                save_json(ADMINS_FILE, store)
-            else:
-                save_json(TEACHERS_FILE, store)
-            record_log(f"{user_type.capitalize()} password reset for {username}")
-            st.success("Password reset successfully! Please login.")
+            st.session_state.teachers[username]["password_hash"] = hash_password(new_pass)
+            save_json(TEACHERS_FILE, st.session_state.teachers)
+            log(f"Password reset for {username}")
+            st.success("Password reset successful! Please login.")
             st.session_state.rerun_flag = True
         else:
             st.error("Invalid OTP.")
@@ -290,7 +254,7 @@ def teacher_dashboard():
                 teacher_data['exam_end'] = end_dt.isoformat()
                 save_json(TEACHERS_FILE, st.session_state.teachers)
                 st.success(f"Exam time set: {start_dt} to {end_dt}")
-                record_log(f"Teacher {teacher} set exam time for lab {lab}: {start_dt} - {end_dt}")
+                log(f"Set exam time: {start_dt} - {end_dt}")
                 st.session_state.rerun_flag = True
 
     # Extend exam duration
@@ -306,7 +270,7 @@ def teacher_dashboard():
             teacher_data['exam_end'] = new_end.isoformat()
             save_json(TEACHERS_FILE, st.session_state.teachers)
             st.success(f"Exam extended till {new_end}")
-            record_log(f"Teacher {teacher} extended exam for lab {lab} till {new_end}")
+            log(f"Extended exam till {new_end}")
             st.session_state.rerun_flag = True
 
     # Passcode management
@@ -324,7 +288,7 @@ def teacher_dashboard():
             "end": end.isoformat()
         }
         st.success(f"New Passcode: {code}")
-        record_log(f"Teacher {teacher} generated passcode {code} for lab {lab}")
+        log(f"Generated passcode {code}")
 
     st.write("Active Passcodes:")
     for code, info in st.session_state.active_passcodes.items():
@@ -380,7 +344,7 @@ def teacher_dashboard():
                         shutil.copy(p, dest)
                         count += 1
                     st.success(f"Copied {count} files to {dest}")
-                    record_log(f"Teacher {teacher} copied {count} files to {dest}")
+                    log(f"Copied {count} files to {dest}")
                 except Exception as e:
                     st.error(f"Copy failed: {e}")
 
@@ -472,7 +436,6 @@ def student_portal():
         # Check existing submissions by student ID
         existing_files = os.listdir(submission_dir) if os.path.exists(submission_dir) else []
 
-        # Check for submissions from same IP (advanced: you can store IP in a file; here simplified)
         ip_file = os.path.join(SUBMISSIONS_ROOT, lab, "ip_submissions.json")
         ip_subs = load_json(ip_file, {})
 
@@ -496,23 +459,7 @@ def student_portal():
         st.success(f"Submission received. Thank you!")
         record_log(f"Student {student_id.strip()} submitted exam for lab {lab} via teacher {teacher_choice}")
 
-        # Rerun after submission to reset form
         st.session_state.rerun_flag = True
-
-# ---------------- ADMIN DASHBOARD ----------------
-def admin_dashboard():
-    st.header(f"🛠️ Admin Dashboard - {st.session_state.logged_in_user}")
-
-    st.subheader("Registered Admins")
-    for admin in st.session_state.admins.keys():
-        st.write(f"- {admin}")
-
-    st.subheader("Registered Teachers")
-    for teacher, data in st.session_state.teachers.items():
-        st.write(f"- {teacher} (Lab: {data.get('lab')})")
-
-    if st.button("Logout"):
-        logout()
 
 # ---------------- MAIN APP ----------------
 def main():
@@ -520,41 +467,24 @@ def main():
         clear_rerun_flag()
         st.experimental_rerun()
 
-    # If logged in, show dashboard based on role
     if st.session_state.logged_in_user:
-        if st.session_state.logged_in_role == "admin":
-            admin_dashboard()
-        elif st.session_state.logged_in_role == "teacher":
-            teacher_dashboard()
-        else:
-            st.error("Unknown role. Logging out.")
-            logout()
+        teacher_dashboard()
     else:
-        # Landing page
         menu = st.sidebar.selectbox("Choose Action", [
             "Student Portal",
-            "Admin Login",
             "Teacher Login",
-            "Register Admin",
             "Register Teacher",
-            "Forgot Admin Password",
             "Forgot Teacher Password",
         ])
 
         if menu == "Student Portal":
             student_portal()
-        elif menu == "Admin Login":
-            login_user("admin")
         elif menu == "Teacher Login":
-            login_user("teacher")
-        elif menu == "Register Admin":
-            register_user("admin")
+            login_teacher()
         elif menu == "Register Teacher":
-            register_user("teacher")
-        elif menu == "Forgot Admin Password":
-            forgot_password_flow("admin")
+            register_teacher()
         elif menu == "Forgot Teacher Password":
-            forgot_password_flow("teacher")
+            forgot_teacher_password()
 
 if __name__ == "__main__":
     main()
