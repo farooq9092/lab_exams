@@ -4,7 +4,7 @@ import json
 import time
 import shutil
 from datetime import datetime, timedelta
-import pyperclip  # <-- for clipboard support
+from tkinter import Tk, filedialog
 
 # ---------------- CONFIG ----------------
 UPLOAD_FOLDER = "submissions"
@@ -21,7 +21,7 @@ else:
         json.dump(teachers, f)
 
 # ---------------- APP TITLE ----------------
-st.title("📘 SZABIST Exam Portal (Enhanced Teacher Control)")
+st.title("📘 SZABIST Exam Portal (Auto File Copy Version)")
 
 menu = st.sidebar.radio("Select User Type", ["Student", "Teacher"])
 
@@ -120,6 +120,7 @@ elif menu == "Teacher":
             else:
                 st.error("❌ Invalid credentials.")
 
+        # After successful login
         if st.session_state.get("logged_in") and st.session_state.get("teacher") == username:
             teacher_data = teachers[username]
             lab = teacher_data["lab"]
@@ -128,25 +129,37 @@ elif menu == "Teacher":
 
             st.subheader(f"📂 Lab: {lab}")
 
-            # Submissions
+            # View Submissions
             if os.path.exists(lab_folder):
                 students = os.listdir(lab_folder)
                 if students:
                     selected_students = st.multiselect("Select student(s) to copy files:", students)
-                    if st.button("📋 Copy File Paths to Clipboard"):
-                        paths = []
-                        for stu in selected_students:
-                            student_files = os.listdir(os.path.join(lab_folder, stu))
-                            for file in student_files:
-                                paths.append(os.path.abspath(os.path.join(lab_folder, stu, file)))
-                        if paths:
-                            joined_paths = "\n".join(paths)
-                            pyperclip.copy(joined_paths)
-                            st.success("✅ File paths copied to clipboard! You can paste them anywhere (Ctrl+V).")
+
+                    if st.button("📂 Select Destination Folder and Copy"):
+                        if selected_students:
+                            # Open folder picker using Tkinter
+                            root = Tk()
+                            root.withdraw()
+                            destination = filedialog.askdirectory(title="Select Destination Folder")
+                            root.destroy()
+
+                            if destination:
+                                total_copied = 0
+                                for stu in selected_students:
+                                    student_files = os.listdir(os.path.join(lab_folder, stu))
+                                    for file in student_files:
+                                        src = os.path.join(lab_folder, stu, file)
+                                        shutil.copy(src, destination)
+                                        total_copied += 1
+                                st.success(f"✅ {total_copied} file(s) copied successfully to:\n📁 {destination}")
+                            else:
+                                st.warning("⚠️ No destination folder selected.")
                         else:
-                            st.warning("⚠️ No files selected.")
+                            st.warning("⚠️ Please select at least one student.")
                 else:
                     st.info("No submissions yet.")
+            else:
+                st.info("No lab submissions found.")
 
             # Logout
             if st.button("🚪 Logout"):
