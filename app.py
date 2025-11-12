@@ -116,4 +116,40 @@ elif menu == "Teacher":
                 st.session_state.logged_in = True
                 st.session_state.teacher = username
                 st.success(f"✅ Welcome {username}")
-                st.rer
+                st.rerun()
+            else:
+                st.error("❌ Invalid credentials.")
+
+        if st.session_state.get("logged_in") and st.session_state.get("teacher") == username:
+            teacher_data = teachers[username]
+            lab = teacher_data["lab"]
+            lab_folder = os.path.join(UPLOAD_FOLDER, lab)
+            os.makedirs(lab_folder, exist_ok=True)
+
+            st.subheader(f"📂 Lab: {lab}")
+
+            # Submissions
+            if os.path.exists(lab_folder):
+                students = os.listdir(lab_folder)
+                if students:
+                    selected_students = st.multiselect("Select student(s) to copy files:", students)
+                    if st.button("📋 Copy File Paths to Clipboard"):
+                        paths = []
+                        for stu in selected_students:
+                            student_files = os.listdir(os.path.join(lab_folder, stu))
+                            for file in student_files:
+                                paths.append(os.path.abspath(os.path.join(lab_folder, stu, file)))
+                        if paths:
+                            joined_paths = "\n".join(paths)
+                            pyperclip.copy(joined_paths)
+                            st.success("✅ File paths copied to clipboard! You can paste them anywhere (Ctrl+V).")
+                        else:
+                            st.warning("⚠️ No files selected.")
+                else:
+                    st.info("No submissions yet.")
+
+            # Logout
+            if st.button("🚪 Logout"):
+                st.session_state.logged_in = False
+                st.session_state.teacher = None
+                st.rerun()
