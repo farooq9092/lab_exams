@@ -61,10 +61,17 @@ if menu == "Student":
                             student_folder = os.path.join(lab_folder, student_id)
                             os.makedirs(student_folder, exist_ok=True)
 
-                            # Add serial number
-                            all_files = os.listdir(lab_folder)
-                            serial = len(all_files) + 1
-                            file_path = os.path.join(student_folder, f"{serial}_{uploaded_file.name}")
+                            # Serial number assign based on total files in LAB
+                            all_existing = []
+                            for sid in os.listdir(lab_folder):
+                                sub = os.path.join(lab_folder, sid)
+                                if os.path.isdir(sub):
+                                    for f in os.listdir(sub):
+                                        all_existing.append(f)
+                            serial = len(all_existing) + 1
+
+                            file_name = f"{serial}_{student_id}_{uploaded_file.name}"
+                            file_path = os.path.join(student_folder, file_name)
 
                             with open(file_path, "wb") as f:
                                 f.write(uploaded_file.getbuffer())
@@ -195,28 +202,47 @@ elif menu == "Teacher":
 
             # View Submissions
             st.markdown("### 🗂️ Student Submissions")
+            selected_files = []
 
             if os.path.exists(lab_folder):
                 students = os.listdir(lab_folder)
                 if students:
                     for i, student in enumerate(students, start=1):
                         files = os.listdir(os.path.join(lab_folder, student))
-                        st.write(f"{i}. **{student}** → {', '.join(files)}")
+                        for file in files:
+                            label = f"{i}. {student} → {file}"
+                            if st.checkbox(label):
+                                selected_files.append(os.path.join(lab_folder, student, file))
                 else:
                     st.info("No submissions yet.")
             else:
                 st.info("No lab submissions found.")
 
-            # Copy All Files
-            if st.button("📁 Copy All Files to Backup"):
-                backup_folder = f"backup_{lab}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                shutil.copytree(lab_folder, backup_folder)
-                st.success(f"✅ All files copied to '{backup_folder}'")
+            # Copy Options
+            st.markdown("### 💾 Copy Options")
+            dest_folder = st.text_input("Enter destination path (e.g., D:/ExamCopies or USB drive path):")
+
+            if st.button("📁 Copy Selected Files"):
+                if selected_files and dest_folder:
+                    os.makedirs(dest_folder, exist_ok=True)
+                    for file_path in selected_files:
+                        shutil.copy(file_path, dest_folder)
+                    st.success(f"✅ {len(selected_files)} selected file(s) copied to '{dest_folder}' successfully.")
+                else:
+                    st.warning("⚠️ Please select files and specify destination path.")
+
+            if st.button("📦 Copy All Files"):
+                if dest_folder:
+                    os.makedirs(dest_folder, exist_ok=True)
+                    for root, _, files in os.walk(lab_folder):
+                        for file in files:
+                            shutil.copy(os.path.join(root, file), dest_folder)
+                    st.success(f"✅ All files copied to '{dest_folder}' successfully.")
+                else:
+                    st.warning("⚠️ Please enter destination path.")
 
             # Logout
             if st.button("🚪 Logout"):
                 st.session_state.logged_in = False
                 st.session_state.teacher = None
-                st.session_state.passcode = None
-                st.session_state.exam_deadline = None
                 st.rerun()
