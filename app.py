@@ -1,334 +1,362 @@
+# app.py
 import streamlit as st
 import os
-import datetime
-import random
-import string
+import json
 import socket
 import shutil
+import zipfile
+import tempfile
+import logging
+from datetime import datetime, timedelta
+import random
+import string
 
-# ----------------- Data Storage -----------------
-if "teachers" not in st.session_state:
-    st.session_state.teachers = {}
-if "logged_in_teacher" not in st.session_state:
-    st.session_state.logged_in_teacher = None
-if "passcode" not in st.session_state:
-    st.session_state.passcode = None
-if "exam_folder" not in st.session_state:
-    st.session_state.exam_folder = "Lab_Exams"
-if "exam_durations" not in st.session_state:
-    st.session_state.exam_durations = {}
-if "submitted_data" not in st.session_state:
-    st.session_state.submitted_data = {}  # filename -> {id, ip}
+# ---------- CONFIG ----------
+APP_DATA = "app_data"                 # all persistent files/folders inside project
+TEACHERS_FILE = os.path.join(APP_DATA, "teachers.json")
+SUBMISSIONS_ROOT = os.path.join(APP_DATA, "submissions")
+LOG_FILE = os.path.join(APP_DATA, "activity.log")
 
-# ----------------- Helpers -----------------
-def generate_passcode(length=6):
-    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=length))
+os.makedirs(APP_DATA, exist_ok=True)
+os.makedirs(SUBMISSIONS_ROOT, exist_ok=True)
 
-def ensure_folder(path):
-    if not os.path.exists(path):
-        os.makedirs(path, exist_ok=True)
+# initialize logging
+logging.basicConfig(filename=LOG_FILE, level=logging.INFO, format='%(asctime)s - %(message)s')
 
-def get_ip():
+# ---------- UTILITIES ----------
+def load_teachers():
+    if os.path.exists(TEACHERS_FILE):
+        with open(TEACHERS_FILE, "r") as f:
+            return json.load(f)
+    return {}
+
+def save_teachers(data):
+    with open(TEACHERS_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+def get_server_ip():
+    # best-effort local IP detection
     try:
-        # best-effort IP detection on server
-        return socket.gethostbyname(socket.gethostname())
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
     except:
-        return "Unknown_IP"
+        return "127.0.0.1"
 
-def generate_serial(files_list):
-    return len(files_list) + 1
+def gen_passcode(n=6):
+    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=n))
 
-def generate_otp():
-    return ''.join(random.choices(string.digits, k=6))
+def gen_otp(n=6):
+    return ''.join(random.choices(string.digits, k=n))
 
-def collect_lab_files(lab_folder):
+def walk_lab_files(lab_folder):
     """
-    Walk lab_folder and return list of tuples:
-    (relative_display_name, absolute_path, student_id, filename, serial)
+    return list of dicts: {display, abs_path, student_id, filename, serial}
+    files enumerated in stable order
     """
     items = []
-    serial = 1
     if not os.path.exists(lab_folder):
         return items
+    serial = 1
     for student in sorted(os.listdir(lab_folder)):
-        student_folder = os.path.join(lab_folder, student)
-        if not os.path.isdir(student_folder):
-            continue
-        for fname in sorted(os.listdir(student_folder)):
-            fpath = os.path.join(student_folder, fname)
+        sdir = os.path.join(lab_folder, student)
+        if not os.path.isdir(sdir): continue
+        for fname in sorted(os.listdir(sdir)):
+            fpath = os.path.join(sdir, fname)
             if os.path.isfile(fpath):
-                # fname format may include serial_studentid_ip_originalname
-                display = f"{student} / {fname}"
-                items.append((f"{serial}. {display}", fpath, student, fname, serial))
+                display = f"{serial}. {student} → {fname}"
+                items.append({"display": display, "path": fpath, "student": student, "filename": fname, "serial": serial})
                 serial += 1
     return items
 
-# ----------------- Signup/Login/OTP -----------------
-def signup_teacher():
-    st.title("👩‍🏫 Teacher Signup")
-    name = st.text_input("Full Name")
-    username = st.text_input("Username")
-    phone = st.text_input("Phone Number (for OTP simulation)")
-    password = st.text_input("Password", type="password")
+def ensure_dir(p):
+    os.makedirs(p, exist_ok=True)
 
-    if st.button("Register"):
-        if not username or not password or not phone:
-            st.warning("All fields are required.")
-            return
-        if username in st.session_state.teachers:
-            st.warning("Username already exists.")
-            return
-        st.session_state.teachers[username] = {"password": password, "name": name, "phone": phone,
-                                               "lab": None, "uploads_allowed": True, "passcode": None,
-                                               "exam_deadline": None}
-        st.success("Registered successfully. Please Login.")
+def record_log(msg):
+    logging.info(msg)
 
-def login_teacher():
-    st.title("👨‍🏫 Teacher Login")
-    username = st.text_input("Username")
-    password = st.text_input("Password", type="password")
+# ---------- SESSION STATE DEFAULTS ----------
+if "teachers" not in st.session_state:
+    st.session_state.teachers = load_teachers()
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+if "user" not in st.session_state:
+    st.session_state.user = None
+if "active_passcodes" not in st.session_state:
+    st.session_state.active_passcodes = {}  # {code: {teacher, lab, start, end}}
+if "submissions_index" not in st.session_state:
+    st.session_state.submissions_index = {}  # record submitted (filename -> {id, ip, time})
 
-    if st.button("Login"):
-        if username in st.session_state.teachers and st.session_state.teachers[username]["password"] == password:
-            st.session_state.logged_in_teacher = username
-            # go directly to dashboard
-            st.experimental_rerun()
-        else:
-            st.error("Invalid username or password")
+# ---------- APP UI ----------
+st.set_page_config(page_title="Exam Portal", layout="centered")
+st.title("📘 Professional Lab Exam Portal")
 
-def forgot_password():
-    st.title("🔑 Forgot Password (OTP)")
-    username = st.text_input("Registered username")
-    if st.button("Send OTP"):
-        if username in st.session_state.teachers:
-            otp = generate_otp()
-            st.session_state.teachers[username]["otp"] = otp
-            # In production: send sms via Twilio. Here we simulate:
-            st.info(f"OTP sent to {st.session_state.teachers[username]['phone']} (Simulated).")
-            st.caption(f"Simulation only — OTP: {otp}")
-            st.session_state._pwd_reset_user = username
-        else:
-            st.error("Username not found.")
-    if "_pwd_reset_user" in st.session_state:
-        otp_input = st.text_input("Enter OTP")
-        new_pass = st.text_input("New password", type="password")
-        if st.button("Reset Password"):
-            user = st.session_state._pwd_reset_user
-            if st.session_state.teachers[user].get("otp") == otp_input:
-                st.session_state.teachers[user]["password"] = new_pass
-                del st.session_state.teachers[user]["otp"]
-                del st.session_state._pwd_reset_user
-                st.success("Password reset. Please login.")
-            else:
-                st.error("Invalid OTP.")
+st.sidebar.title("Navigation")
+mode = st.sidebar.radio("", ["Student Portal", "Teacher Login", "Teacher Signup", "Forgot Password", "Admin"])
 
-# ----------------- Teacher Dashboard -----------------
-def teacher_dashboard():
-    teacher = st.session_state.logged_in_teacher
-    st.sidebar.title(f"Welcome, {st.session_state.teachers[teacher]['name']}")
-    if st.sidebar.button("Logout"):
-        st.session_state.logged_in_teacher = None
-        st.experimental_rerun()
-
-    st.header("📚 Teacher Dashboard")
-
-    # Lab assignment / set if not set
-    current_lab = st.text_input("Your Lab Name (e.g., Lab1)", value=st.session_state.teachers[teacher].get("lab") or "")
-    if st.button("Save Lab Name"):
-        if current_lab:
-            st.session_state.teachers[teacher]["lab"] = current_lab
-            st.success(f"Saved lab name: {current_lab}")
-    lab = st.session_state.teachers[teacher].get("lab")
-    if not lab:
-        st.info("Please set your Lab Name to view/manage submissions.")
-        return
-
-    lab_folder = os.path.join(st.session_state.exam_folder, lab)
-    ensure_folder(lab_folder)
-
-    # Controls
-    col1, col2, col3 = st.columns([1,1,1])
-    with col1:
-        if st.button("🔐 Generate Passcode"):
-            code = generate_passcode(6)
-            st.session_state.teachers[teacher]["passcode"] = code
-            st.success(f"Passcode: {code} (share with students)")
-    with col2:
-        duration = st.number_input("Exam duration (minutes)", min_value=5, max_value=720, value=60)
-        if st.button("⏰ Start Exam"):
-            deadline = datetime.datetime.now() + datetime.timedelta(minutes=duration)
-            st.session_state.teachers[teacher]["exam_deadline"] = deadline.isoformat()
-            st.success(f"Exam started till {deadline.strftime('%Y-%m-%d %H:%M:%S')}")
-    with col3:
-        if st.button("➕ Extend by 10 min"):
-            dl = st.session_state.teachers[teacher].get("exam_deadline")
-            if dl:
-                new_dl = datetime.datetime.fromisoformat(dl) + datetime.timedelta(minutes=10)
-                st.session_state.teachers[teacher]["exam_deadline"] = new_dl.isoformat()
-                st.success(f"Extended to {new_dl.strftime('%Y-%m-%d %H:%M:%S')}")
-            else:
-                st.warning("Start exam first.")
-
-    # Show remaining time
-    dl = st.session_state.teachers[teacher].get("exam_deadline")
-    if dl:
-        remaining = datetime.datetime.fromisoformat(dl) - datetime.datetime.now()
-        if remaining.total_seconds() > 0:
-            st.info(f"Time remaining: {str(remaining).split('.')[0]}")
-        else:
-            st.warning("Exam time is over.")
-
-    st.markdown("---")
-    st.subheader("🗂 Submissions")
-
-    # Collect files correctly (walk student subfolders)
-    lab_files = collect_lab_files(lab_folder)  # list of tuples (display, abs_path, student_id, fname, serial)
-
-    if not lab_files:
-        st.info("No submissions yet.")
-    else:
-        # Provide Select All checkbox
-        select_all = st.checkbox("Select All files")
-        # Build list for multiselect display
-        display_names = [item[0] for item in lab_files]
-        if select_all:
-            selected = st.multiselect("Selected files", display_names, default=display_names)
-        else:
-            selected = st.multiselect("Selected files", display_names)
-
-        # Map selected display names back to absolute paths
-        selected_paths = []
-        for item in lab_files:
-            if item[0] in selected:
-                selected_paths.append((item[0], item[1]))  # (display, path)
-
-        # Show per-file download buttons and preview
-        st.markdown("**Files (direct download):**")
-        for disp, path, student_id, fname, serial in lab_files:
-            cols = st.columns([6,1])
-            cols[0].write(disp)
-            with open(path, "rb") as f:
-                data = f.read()
-            cols[1].download_button(label="⬇", data=data, file_name=fname, mime="application/octet-stream")
-
-        st.markdown("---")
-        st.subheader("Copy / Export")
-
-        # Destination path input (server-local path). On Streamlit Cloud this writes to server storage only.
-        dest = st.text_input("Destination folder path (where files will be copied on the server):", value="")
-        if st.button("📁 Copy Selected Files"):
-            if not selected_paths:
-                st.warning("Select at least one file.")
-            elif not dest:
-                st.warning("Enter destination path.")
-            else:
-                try:
-                    ensure_folder(dest)
-                    count = 0
-                    for disp, p in selected_paths:
-                        shutil.copy(p, dest)
-                        count += 1
-                    st.success(f"Copied {count} file(s) to {dest}")
-                except Exception as e:
-                    st.error(f"Copy failed: {e}")
-
-        if st.button("📦 Copy All Files to Destination"):
-            if not dest:
-                st.warning("Enter destination path.")
-            else:
-                try:
-                    ensure_folder(dest)
-                    count = 0
-                    for disp, p, *_ in lab_files:
-                        shutil.copy(p, dest)
-                        count += 1
-                    st.success(f"Copied {count} file(s) to {dest}")
-                except Exception as e:
-                    st.error(f"Copy all failed: {e}")
-
-# ----------------- Student Portal -----------------
-def student_portal():
-    st.title("🎓 Student Portal")
+# ---------------- STUDENT PORTAL ----------------
+if mode == "Student Portal":
+    st.header("🎓 Student Upload")
+    # choose teacher -> lab shown through passcode mapping
     teacher_list = list(st.session_state.teachers.keys())
     if not teacher_list:
-        st.info("No teachers registered yet.")
-        return
-
-    teacher_choice = st.selectbox("Select Teacher", teacher_list)
-    passcode = st.text_input("Enter Passcode Provided by Teacher")
-
-    # Validate teacher and passcode
-    teacher_data = st.session_state.teachers.get(teacher_choice)
-    if not teacher_data:
-        st.error("Invalid teacher selected.")
-        return
-
-    # check uploads allowed and deadline
-    allowed = teacher_data.get("uploads_allowed", True)
-    dl = teacher_data.get("exam_deadline")
-    if dl:
-        if datetime.datetime.fromisoformat(dl) < datetime.datetime.now():
-            allowed = False
-
-    if not allowed:
-        st.warning("Uploads are closed for this teacher/lab.")
-        return
-
-    if passcode != teacher_data.get("passcode"):
-        st.info("Enter correct passcode to enable upload.")
-        # still show nothing else
-        return
-
-    lab_name = st.text_input("Enter Lab Name (as given by teacher)")
-    student_id = st.text_input("Enter Student ID")
-    uploaded_file = st.file_uploader("Upload file (pdf/docx):", type=["pdf", "docx"])
-
-    if st.button("Submit Paper"):
-        if not (lab_name and student_id and uploaded_file):
-            st.warning("Fill all fields and choose file.")
-            return
-        # prepare folder
-        lab_folder = os.path.join(st.session_state.exam_folder, lab_name)
-        ensure_folder(lab_folder)
-        # student folder
-        student_folder = os.path.join(lab_folder, student_id)
-        ensure_folder(student_folder)
-
-        # check duplicates: same id OR same ip
-        ip = get_ip()
-        duplicate = False
-        for record in st.session_state.submitted_data.values():
-            if record["id"] == student_id or record["ip"] == ip:
-                duplicate = True
-                break
-        if duplicate:
-            st.error("Submission blocked: same ID or same IP already submitted.")
-            return
-
-        # collect existing files for serial
-        existing = collect_lab_files(lab_folder)
-        serial = generate_serial(existing)
-        safe_name = f"{serial}_{student_id}_{ip}_{uploaded_file.name}"
-        save_path = os.path.join(student_folder, safe_name)
-        with open(save_path, "wb") as f:
-            f.write(uploaded_file.getbuffer())
-
-        # record submission
-        st.session_state.submitted_data[safe_name] = {"id": student_id, "ip": ip, "time": datetime.datetime.now().isoformat()}
-        st.success(f"Uploaded as: {safe_name}")
-
-# ----------------- App Navigation -----------------
-st.sidebar.title("Navigation")
-menu = st.sidebar.radio("Go to", ["Teacher Login", "Teacher Signup", "Forgot Password", "Student Portal"])
-
-if menu == "Teacher Signup":
-    signup_teacher()
-elif menu == "Teacher Login":
-    if st.session_state.logged_in_teacher:
-        teacher_dashboard()
+        st.info("No teachers registered yet. Ask your instructor.")
     else:
-        login_teacher()
-elif menu == "Forgot Password":
-    forgot_password()
-elif menu == "Student Portal":
-    student_portal()
+        teacher_choice = st.selectbox("Select Teacher", ["-- select --"] + teacher_list)
+        passcode = st.text_input("Enter Exam Passcode (from teacher)", value="", help="Enter code given by your teacher for this exam")
+        student_id = st.text_input("Enter Your Student ID (use unique ID)")
+        uploaded = st.file_uploader("Choose PDF/DOCX file", type=["pdf", "docx"])
+        server_ip = get_server_ip()
+
+        if st.button("Submit Paper"):
+            if not (teacher_choice and teacher_choice != "-- select --"):
+                st.warning("Select your teacher.")
+            elif not passcode or passcode not in st.session_state.active_passcodes:
+                st.error("Invalid or expired passcode.")
+            else:
+                pass_info = st.session_state.active_passcodes.get(passcode)
+                # verify assigned teacher and lab and deadline
+                if pass_info["teacher"] != teacher_choice:
+                    st.error("Passcode does not belong to selected teacher.")
+                else:
+                    # time check
+                    now = datetime.now()
+                    end = datetime.fromisoformat(pass_info["end"])
+                    if now > end:
+                        st.error("Submission time expired for this passcode.")
+                    else:
+                        # file checks
+                        if not student_id or not uploaded:
+                            st.warning("Enter student ID and upload file.")
+                        else:
+                            lab = pass_info["lab"]
+                            lab_folder = os.path.join(SUBMISSIONS_ROOT, lab)
+                            ensure_dir(lab_folder)
+                            student_folder = os.path.join(lab_folder, student_id)
+                            ensure_dir(student_folder)
+
+                            # Duplicate check: same ID OR same IP should be blocked
+                            duplicate = False
+                            for rec in st.session_state.submissions_index.values():
+                                if rec["id"] == student_id or rec["ip"] == server_ip:
+                                    duplicate = True
+                                    break
+                            if duplicate:
+                                st.error("Submission blocked: same Student ID or same IP already submitted.")
+                            else:
+                                # compute serial: count total files in lab
+                                total_files = 0
+                                for s in os.listdir(lab_folder):
+                                    sf = os.path.join(lab_folder, s)
+                                    if os.path.isdir(sf):
+                                        total_files += len([x for x in os.listdir(sf) if os.path.isfile(os.path.join(sf, x))])
+                                serial = total_files + 1
+                                safe_name = f"{serial}_{student_id}_{server_ip}_{uploaded.name}"
+                                dest = os.path.join(student_folder, safe_name)
+                                with open(dest, "wb") as f:
+                                    f.write(uploaded.getbuffer())
+
+                                # record
+                                st.session_state.submissions_index[safe_name] = {"id": student_id, "ip": server_ip, "time": datetime.now().isoformat(), "lab": lab, "teacher": teacher_choice}
+                                record_log(f"UPLOAD: {safe_name} by {student_id} ip={server_ip} lab={lab} teacher={teacher_choice}")
+                                st.success(f"Submitted ✅ as {safe_name}")
+
+# ---------------- TEACHER SIGNUP ----------------
+elif mode == "Teacher Signup":
+    st.header("👩‍🏫 Teacher Signup")
+    name = st.text_input("Full name")
+    username = st.text_input("Username")
+    phone = st.text_input("Phone (for OTP SMS; optional)")
+    password = st.text_input("Password", type="password")
+    lab_for = st.text_input("Assigned Lab name (e.g., Lab1)")
+
+    if st.button("Register"):
+        if not username or not password or not lab_for:
+            st.warning("Fill username, password and lab.")
+        elif username in st.session_state.teachers:
+            st.warning("Username exists.")
+        else:
+            st.session_state.teachers[username] = {"name": name or username, "password": password, "phone": phone, "lab": lab_for, "uploads_allowed": True}
+            save_teachers(st.session_state.teachers)
+            record_log(f"TEACHER_REGISTER: {username} lab={lab_for}")
+            st.success("Registered. Please login using Teacher Login.")
+
+# ---------------- FORGOT PASSWORD ----------------
+elif mode == "Forgot Password":
+    st.header("🔑 Forgot Password (OTP)")
+    uname = st.text_input("Enter your username")
+    if st.button("Send OTP"):
+        teachers = st.session_state.teachers
+        if uname not in teachers:
+            st.error("Username not found.")
+        else:
+            otp = gen_otp()
+            teachers[uname]["otp"] = otp
+            save_teachers(teachers)
+            # ---- PRODUCTION: integrate Twilio here to send SMS to teachers[uname]['phone'] ----
+            st.info(f"OTP simulated (for real SMS integrate Twilio): {otp}")
+            record_log(f"OTP_SENT simulated for {uname}")
+
+    code = st.text_input("Enter OTP")
+    new_pw = st.text_input("New password", type="password")
+    if st.button("Reset Password"):
+        teachers = st.session_state.teachers
+        if uname in teachers and teachers[uname].get("otp") == code:
+            teachers[uname]["password"] = new_pw
+            teachers[uname].pop("otp", None)
+            save_teachers(teachers)
+            st.success("Password reset. Login now.")
+            record_log(f"PW_RESET for {uname}")
+        else:
+            st.error("Invalid OTP or user.")
+
+# ---------------- TEACHER LOGIN & DASHBOARD ----------------
+elif mode == "Teacher Login":
+    if st.session_state.logged_in:
+        # direct dashboard (no extra welcome)
+        teacher = st.session_state.user
+        st.header(f"🔒 {teacher} — Dashboard")
+        teachers = st.session_state.teachers
+        info = teachers[teacher]
+        lab = info.get("lab")
+        st.subheader(f"Lab: {lab}")
+
+        # controls row
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            if st.button("Generate Passcode"):
+                code = gen_passcode(6)
+                # set active passcode valid for configured minutes (default 60)
+                duration = st.number_input("Passcode duration (minutes)", min_value=5, max_value=720, value=60, key="pc_duration")
+                start = datetime.now()
+                end = start + timedelta(minutes=duration)
+                st.session_state.active_passcodes[code] = {"teacher": teacher, "lab": lab, "start": start.isoformat(), "end": end.isoformat()}
+                st.success(f"Passcode: {code} (valid till {end.strftime('%Y-%m-%d %H:%M:%S')})")
+                record_log(f"PASSGEN by {teacher} lab={lab} code={code} dur={duration}")
+
+        with c2:
+            if st.button("Start Exam (enable uploads)"):
+                teachers[teacher]["uploads_allowed"] = True
+                save_teachers(teachers)
+                st.success("Uploads enabled.")
+        with c3:
+            if st.button("Disable Uploads"):
+                teachers[teacher]["uploads_allowed"] = False
+                save_teachers(teachers)
+                st.warning("Uploads disabled.")
+
+        st.markdown("---")
+        st.subheader("Submissions (select & manage)")
+
+        lab_folder = os.path.join(SUBMISSIONS_ROOT, lab)
+        ensure_dir(lab_folder)
+        files = walk_lab_files(lab_folder)  # list of dicts
+
+        if not files:
+            st.info("No submissions yet.")
+        else:
+            # select all toggle
+            sel_all = st.checkbox("Select All")
+            display_list = [f["display"] for f in files]
+            if sel_all:
+                selected = st.multiselect("Selected files", display_list, default=display_list)
+            else:
+                selected = st.multiselect("Selected files", display_list)
+
+            # map selected to paths
+            selected_paths = [f["path"] for f in files if f["display"] in selected]
+
+            # direct download listing + individual downloads
+            st.markdown("**Files:**")
+            for f in files:
+                name = f["filename"]
+                st.write(f"{f['display']}")
+                with open(f["path"], "rb") as fh:
+                    st.download_button(label="Download", data=fh, file_name=name, key=f"dl_{f['serial']}")
+
+            # copy to folder (works if running locally on teacher machine)
+            st.markdown("---")
+            st.subheader("Copy selected → local folder (runs on server, for local use put server on teacher machine)")
+
+            dest = st.text_input("Destination folder path (absolute) on this machine", value="")
+            if st.button("Copy Selected"):
+                if not selected_paths:
+                    st.warning("Select files first")
+                elif not dest:
+                    st.warning("Enter destination path")
+                else:
+                    try:
+                        ensure_dir(dest)
+                        count = 0
+                        for p in selected_paths:
+                            shutil.copy(p, dest)
+                            count += 1
+                        st.success(f"Copied {count} files to {dest}")
+                        record_log(f"COPY_SELECTED by {teacher} -> {dest} count={count}")
+                    except Exception as e:
+                        st.error(f"Copy failed: {e}")
+
+            if st.button("Copy All to Destination"):
+                if not dest:
+                    st.warning("Enter destination path")
+                else:
+                    try:
+                        ensure_dir(dest)
+                        cnt = 0
+                        for f in files:
+                            shutil.copy(f["path"], dest)
+                            cnt += 1
+                        st.success(f"Copied all {cnt} files to {dest}")
+                        record_log(f"COPY_ALL by {teacher} -> {dest} count={cnt}")
+                    except Exception as e:
+                        st.error(f"Copy all failed: {e}")
+
+            # download selected as ZIP
+            if st.button("Download Selected as ZIP"):
+                if not selected_paths:
+                    st.warning("Select files first")
+                else:
+                    # create temp zip
+                    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".zip")
+                    with zipfile.ZipFile(tmp.name, "w") as zf:
+                        for p in selected_paths:
+                            zf.write(p, arcname=os.path.basename(p))
+                    with open(tmp.name, "rb") as zf:
+                        st.download_button("Download ZIP", zf.read(), file_name=f"submissions_{lab}.zip")
+                    os.unlink(tmp.name)
+
+        if st.button("Logout"):
+            st.session_state.logged_in = False
+            st.session_state.user = None
+            st.experimental_rerun()
+
+    else:
+        # login form (direct login -> redirect)
+        st.header("👩‍🏫 Teacher Login")
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+        if st.button("Login"):
+            teachers = st.session_state.teachers
+            if username in teachers and teachers[username]["password"] == password:
+                st.session_state.logged_in = True
+                st.session_state.user = username
+                st.experimental_rerun()
+            else:
+                st.error("Invalid credentials")
+
+# ---------------- ADMIN (simple) ----------------
+elif mode == "Admin":
+    st.header("🔧 Admin (local)")
+    st.write("Server IP:", get_server_ip())
+    st.write("Teachers registered:", list(st.session_state.teachers.keys()))
+    if st.button("Save teachers to disk"):
+        save_teachers(st.session_state.teachers)
+        st.success("Saved")
+    if st.button("Reload teachers from disk"):
+        st.session_state.teachers = load_teachers()
+        st.success("Reloaded")
+
+# ---------- persist teachers on action exit ----------
+save_teachers(st.session_state.teachers)
