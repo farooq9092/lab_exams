@@ -79,3 +79,128 @@ def forgot_password():
             otp = generate_otp()
             st.session_state.teachers[username]["otp"] = otp
             # ⚠️ Simulated SMS
+            st.info(f"📱 OTP sent to {st.session_state.teachers[username]['phone']}")
+            st.caption(f"(Simulated OTP: **{otp}**)")  # Visible only for testing
+            st.session_state.current_reset_user = username
+        else:
+            st.error("Username not found!")
+
+    if "current_reset_user" in st.session_state:
+        otp_input = st.text_input("Enter received OTP")
+        new_pass = st.text_input("New Password", type="password")
+        if st.button("Reset Password"):
+            if otp_input == st.session_state.teachers[st.session_state.current_reset_user].get("otp"):
+                st.session_state.teachers[st.session_state.current_reset_user]["password"] = new_pass
+                del st.session_state.teachers[st.session_state.current_reset_user]["otp"]
+                del st.session_state.current_reset_user
+                st.success("✅ Password reset successful! Please log in.")
+            else:
+                st.error("Incorrect OTP.")
+
+# ----------------- Teacher Dashboard -----------------
+def teacher_dashboard():
+    st.sidebar.title(f"Welcome, {st.session_state.teachers[st.session_state.logged_in_teacher]['name']}")
+    if st.sidebar.button("Logout"):
+        st.session_state.logged_in_teacher = None
+        st.experimental_rerun()
+
+    st.header("📚 Teacher Dashboard")
+
+    lab_name = st.text_input("Enter Lab Name (e.g., Lab1)")
+    folder_path = os.path.join(st.session_state.exam_folder, st.session_state.logged_in_teacher, lab_name)
+    ensure_folder(folder_path)
+
+    # Generate Passcode
+    if st.button("Generate Passcode for Students"):
+        st.session_state.passcode = generate_passcode()
+        st.success(f"🎟️ Passcode for students: {st.session_state.passcode}")
+
+    # Set & Extend Duration
+    st.subheader("⏱ Exam Time Settings")
+    duration = st.number_input("Set Exam Duration (minutes)", min_value=5, max_value=300, value=60)
+    if st.button("Start Exam"):
+        st.session_state.exam_durations[lab_name] = duration
+        st.success(f"Exam started for {duration} minutes!")
+
+    extra_time = st.number_input("Extend by (minutes)", min_value=1, max_value=60, value=10)
+    if st.button("Extend Time"):
+        st.session_state.exam_durations[lab_name] = st.session_state.exam_durations.get(lab_name, duration) + extra_time
+        st.info(f"Extended! New Duration: {st.session_state.exam_durations[lab_name]} minutes")
+
+    # Show Uploaded Papers
+    st.subheader("📄 Submitted Papers")
+    files = sorted(os.listdir(folder_path))
+    if files:
+        selected_files = st.multiselect("Select Files to Copy/Download", files)
+
+        # Copy All or Selected
+        if st.button("📂 Copy Selected Files"):
+            dest = st.text_input("Enter destination folder path on your system:")
+            if dest and os.path.exists(dest):
+                for f in selected_files:
+                    shutil.copy(os.path.join(folder_path, f), dest)
+                st.success(f"Copied {len(selected_files)} files to {dest}")
+            elif dest:
+                st.error("❌ Invalid destination folder path.")
+
+        # Download individually
+        for i, f in enumerate(files, 1):
+            file_path = os.path.join(folder_path, f)
+            st.write(f"{i}. {f}")
+            with open(file_path, "rb") as fp:
+                st.download_button(label="⬇ Download", data=fp, file_name=f, key=f"download_{i}")
+
+    else:
+        st.info("No papers submitted yet.")
+
+# ----------------- Student Portal -----------------
+def student_portal():
+    st.title("🎓 Student Portal")
+    passcode = st.text_input("Enter Passcode Provided by Teacher")
+
+    if passcode == st.session_state.passcode and st.session_state.logged_in_teacher:
+        lab_name = st.text_input("Enter Lab Name (provided by teacher)")
+        student_id = st.text_input("Enter Student ID")
+        student_ip = get_ip()
+        teacher_folder = os.path.join(st.session_state.exam_folder, st.session_state.logged_in_teacher)
+        upload_folder = os.path.join(teacher_folder, lab_name)
+        ensure_folder(upload_folder)
+
+        uploaded_file = st.file_uploader("Upload your file (PDF/Word)", type=["pdf", "docx", "doc"])
+        if uploaded_file:
+            # Check for duplicate ID or IP
+            existing_submissions = [
+                val for val in st.session_state.submitted_data.values()
+                if val["id"] == student_id or val["ip"] == student_ip
+            ]
+            if existing_submissions:
+                st.error("❌ Submission blocked! Same ID or IP already submitted.")
+            else:
+                files = os.listdir(upload_folder)
+                serial = generate_serial(files)
+                filename = f"{serial}_{student_id}_{student_ip}_{uploaded_file.name}"
+                save_path = os.path.join(upload_folder, filename)
+
+                with open(save_path, "wb") as f:
+                    f.write(uploaded_file.read())
+
+                st.session_state.submitted_data[filename] = {"id": student_id, "ip": student_ip}
+                st.success("✅ File submitted successfully!")
+    else:
+        st.warning("Enter a valid passcode to continue.")
+
+# ----------------- Navigation -----------------
+st.sidebar.title("🔹 Navigation")
+menu = st.sidebar.radio("Go to", ["Teacher Login", "Teacher Signup", "Forgot Password", "Student Portal"])
+
+if menu == "Teacher Signup":
+    signup_teacher()
+elif menu == "Teacher Login":
+    if st.session_state.logged_in_teacher:
+        teacher_dashboard()
+    else:
+        login_teacher()
+elif menu == "Forgot Password":
+    forgot_password()
+elif menu == "Student Portal":
+    student_portal()
