@@ -1,58 +1,51 @@
 import streamlit as st
 import os
 import json
-import hashlib
-import random
-import string
-from datetime import datetime, timedelta
+import socket
 import shutil
 import zipfile
 import tempfile
 import logging
-import socket
+from datetime import datetime, timedelta
+import random
+import string
+import hashlib
 
-# --- Constants & Paths ---
+# ---------------- CONFIG ----------------
 APP_DATA = "app_data"
 ADMINS_FILE = os.path.join(APP_DATA, "admins.json")
 TEACHERS_FILE = os.path.join(APP_DATA, "teachers.json")
-SUBMISSIONS_DIR = os.path.join(APP_DATA, "submissions")
+SUBMISSIONS_ROOT = os.path.join(APP_DATA, "submissions")
 LOG_FILE = os.path.join(APP_DATA, "activity.log")
 
 os.makedirs(APP_DATA, exist_ok=True)
-os.makedirs(SUBMISSIONS_DIR, exist_ok=True)
+os.makedirs(SUBMISSIONS_ROOT, exist_ok=True)
 
-# --- Logging ---
-logging.basicConfig(filename=LOG_FILE, level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(filename=LOG_FILE, level=logging.INFO, format='%(asctime)s - %(message)s')
 
-def log(msg):
-    logging.info(msg)
-
-# --- Utility functions ---
+# ---------------- UTILITIES ----------------
 def hash_password(password: str) -> str:
     return hashlib.sha256(password.encode('utf-8')).hexdigest()
 
 def verify_password(password: str, hashed: str) -> bool:
     return hash_password(password) == hashed
 
-def load_json(filepath):
+def load_json(filepath, default=None):
+    if default is None:
+        default = {}
     if os.path.exists(filepath):
-        with open(filepath, 'r') as f:
-            return json.load(f)
-    return {}
+        try:
+            with open(filepath, 'r') as f:
+                return json.load(f)
+        except:
+            return default
+    return default
 
 def save_json(filepath, data):
     with open(filepath, 'w') as f:
         json.dump(data, f, indent=2)
 
-def generate_otp(length=6):
-    return ''.join(random.choices(string.digits, k=length))
-
-def generate_passcode(length=8):
-    chars = string.ascii_uppercase + string.digits
-    return ''.join(random.choices(chars, k=length))
-
-def get_client_ip():
-    # Try to get local IP address of client, fallback to localhost
+def get_server_ip():
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
@@ -62,21 +55,47 @@ def get_client_ip():
     except:
         return "127.0.0.1"
 
+def gen_passcode(length=6):
+    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=length))
+
+def gen_otp(length=6):
+    return ''.join(random.choices(string.digits, k=length))
+
 def ensure_dir(path):
-    if not os.path.exists(path):
-        os.makedirs(path)
+    os.makedirs(path, exist_ok=True)
 
-def zip_files(files, zip_path):
-    with zipfile.ZipFile(zip_path, 'w') as zf:
-        for fpath in files:
-            zf.write(fpath, os.path.basename(fpath))
+def record_log(msg):
+    logging.info(msg)
 
-# --- Session State Initialization ---
+def walk_lab_files(lab_folder):
+    files_list = []
+    if not os.path.exists(lab_folder):
+        return files_list
+    serial = 1
+    for student in sorted(os.listdir(lab_folder)):
+        sdir = os.path.join(lab_folder, student)
+        if not os.path.isdir(sdir):
+            continue
+        for fname in sorted(os.listdir(sdir)):
+            fpath = os.path.join(sdir, fname)
+            if os.path.isfile(fpath):
+                display = f"{serial}. {student} → {fname}"
+                files_list.append({
+                    "display": display,
+                    "path": fpath,
+                    "student": student,
+                    "filename": fname,
+                    "serial": serial
+                })
+                serial += 1
+    return files_list
+
+# ---------------- SESSION STATE INIT ----------------
 if 'admins' not in st.session_state:
-    st.session_state.admins = load_json(ADMINS_FILE)
+    st.session_state.admins = load_json(ADMINS_FILE, {})
 
 if 'teachers' not in st.session_state:
-    st.session_state.teachers = load_json(TEACHERS_FILE)
+    st.session_state.teachers = load_json(TEACHERS_FILE, {})
 
 if 'logged_in_user' not in st.session_state:
     st.session_state.logged_in_user = None
@@ -84,71 +103,114 @@ if 'logged_in_user' not in st.session_state:
 if 'logged_in_role' not in st.session_state:
     st.session_state.logged_in_role = None  # 'admin' or 'teacher'
 
-if 'otp_store' not in st.session_state:
-    st.session_state.otp_store = {}  # {username: otp}
-
-if 'exam_passcodes' not in st.session_state:
-    # exam_passcodes structure: {passcode: {teacher:..., lab:..., start_time:..., end_time:..., uploads_enabled: True/False}}
-    st.session_state.exam_passcodes = {}
+if 'active_passcodes' not in st.session_state:
+    st.session_state.active_passcodes = {}
 
 if 'submissions_index' not in st.session_state:
-    # structure: {teacher: {student_id: {"ip":..., "files":[list_of_files], "submitted_at":...}}}
     st.session_state.submissions_index = {}
 
-# --- Authentication functions ---
+if 'otp_store' not in st.session_state:
+    st.session_state.otp_store = {}
+
+if 'rerun_flag' not in st.session_state:
+    st.session_state.rerun_flag = False
+
+# ---------------- APP CONFIG ----------------
+st.set_page_config(page_title="Professional Lab Exam Portal", layout="centered")
+st.title("📘 Professional Lab Exam Portal")
+
+# ---------------- AUTH HELPERS ----------------
+def logout():
+    st.session_state.logged_in_user = None
+    st.session_state.logged_in_role = None
+    st.session_state.rerun_flag = True
+
+def log(action):
+    user = st.session_state.logged_in_user or "Unknown"
+    role = st.session_state.logged_in_role or "Unknown"
+    record_log(f"{role.upper()} {user}: {action}")
+
+def rerun_if_flagged():
+    if st.session_state.get('rerun_flag', False):
+        st.session_state.rerun_flag = False
+        st.experimental_rerun()
+
+# ---------------- OTP HANDLING ----------------
+def send_otp(user_email_or_phone):
+    # Real OTP integration should be here
+    # For demo, just generate and store OTP in session
+    otp = gen_otp()
+    st.session_state.otp_store[user_email_or_phone] = otp
+    record_log(f"OTP sent to {user_email_or_phone} (simulated). OTP: {otp}")
+    st.success(f"OTP sent to {user_email_or_phone}. (In real app, OTP will be delivered securely)")
+    return otp
+
+def verify_otp(user_email_or_phone, entered_otp):
+    real_otp = st.session_state.otp_store.get(user_email_or_phone)
+    if real_otp and entered_otp == real_otp:
+        del st.session_state.otp_store[user_email_or_phone]  # Consume OTP after verification
+        return True
+    return False
+
+# ---------------- USER MANAGEMENT ----------------
 def register_user(user_type):
-    st.subheader(f"Register New {user_type.capitalize()}")
+    st.header(f"🔑 Register New {user_type.capitalize()}")
     username = st.text_input(f"{user_type.capitalize()} Username", key=f"reg_{user_type}_username")
-    password = st.text_input(f"{user_type.capitalize()} Password", type="password", key=f"reg_{user_type}_password")
+    password = st.text_input(f"Password", type="password", key=f"reg_{user_type}_password")
     password_confirm = st.text_input(f"Confirm Password", type="password", key=f"reg_{user_type}_password_confirm")
 
+    # Additional fields
     if user_type == "teacher":
-        full_name = st.text_input("Full Name", key="reg_teacher_fullname")
-        phone = st.text_input("Phone Number (for OTP)", key="reg_teacher_phone")
+        name = st.text_input("Full Name", key="reg_teacher_name")
+        phone = st.text_input("Phone (for OTP verification)", key="reg_teacher_phone")
         lab = st.text_input("Assigned Lab Name", key="reg_teacher_lab")
 
     if st.button(f"Register {user_type.capitalize()}"):
-        if not username or not password or not password_confirm:
-            st.warning("Please fill all fields.")
+        if not username or not password:
+            st.warning("Username and password are required.")
             return
         if password != password_confirm:
             st.warning("Passwords do not match.")
             return
-
         store = st.session_state.admins if user_type == "admin" else st.session_state.teachers
         if username in store:
-            st.error(f"{user_type.capitalize()} username already exists.")
+            st.warning(f"{user_type.capitalize()} username already exists.")
             return
 
+        # For teacher, check required extra fields
+        if user_type == "teacher" and (not name or not lab):
+            st.warning("Please fill all teacher details.")
+            return
+
+        # Save user
         hashed = hash_password(password)
         if user_type == "admin":
             store[username] = {"password_hash": hashed}
         else:
-            if not full_name or not lab:
-                st.warning("Please fill all required fields (Full Name, Lab).")
-                return
             store[username] = {
                 "password_hash": hashed,
-                "full_name": full_name,
+                "name": name,
                 "phone": phone,
                 "lab": lab,
-                "uploads_enabled": False,
+                "uploads_allowed": True,
                 "exam_start": None,
                 "exam_end": None,
-                "passcodes": []
             }
+
+        # Persist to file
         if user_type == "admin":
             save_json(ADMINS_FILE, store)
         else:
             save_json(TEACHERS_FILE, store)
-        log(f"New {user_type} registered: {username}")
+
+        record_log(f"Registered new {user_type}: {username}")
         st.success(f"{user_type.capitalize()} registered successfully! Please login.")
-        st.experimental_rerun()
+        st.session_state.rerun_flag = True
 
 def login_user(user_type):
-    st.subheader(f"{user_type.capitalize()} Login")
+    st.header(f"🔒 {user_type.capitalize()} Login")
     username = st.text_input(f"{user_type.capitalize()} Username", key=f"login_{user_type}_username")
-    password = st.text_input(f"{user_type.capitalize()} Password", type="password", key=f"login_{user_type}_password")
+    password = st.text_input(f"Password", type="password", key=f"login_{user_type}_password")
 
     if st.button(f"Login {user_type.capitalize()}"):
         store = st.session_state.admins if user_type == "admin" else st.session_state.teachers
@@ -159,352 +221,342 @@ def login_user(user_type):
         if verify_password(password, user["password_hash"]):
             st.session_state.logged_in_user = username
             st.session_state.logged_in_role = user_type
-            log(f"{user_type.capitalize()} logged in: {username}")
-            st.experimental_rerun()
+            record_log(f"{user_type.capitalize()} logged in: {username}")
+            st.session_state.rerun_flag = True
         else:
             st.error("Invalid password.")
 
-def logout():
-    if st.session_state.logged_in_user:
-        log(f"User logged out: {st.session_state.logged_in_user} ({st.session_state.logged_in_role})")
-    st.session_state.logged_in_user = None
-    st.session_state.logged_in_role = None
-    st.experimental_rerun()
-
 def forgot_password_flow(user_type):
-    st.subheader(f"{user_type.capitalize()} Password Reset")
+    st.header(f"🔐 Forgot {user_type.capitalize()} Password")
+    username = st.text_input(f"Enter your {user_type} username", key=f"forgot_{user_type}_username")
+    store = st.session_state.admins if user_type == "admin" else st.session_state.teachers
+    if username not in store:
+        if username:
+            st.error(f"{user_type.capitalize()} username not found.")
+        return
 
-    username = st.text_input(f"{user_type.capitalize()} Username", key=f"fp_{user_type}_username")
-    if username and username not in (st.session_state.admins if user_type == "admin" else st.session_state.teachers):
-        st.error(f"{user_type.capitalize()} username not found.")
+    # For demo, use phone/email for OTP; here phone for teachers, username for admins
+    contact_info = username if user_type == "admin" else store[username].get("phone", "")
+    if not contact_info:
+        st.error("No contact info available to send OTP.")
+        return
 
     if st.button("Send OTP"):
-        otp = generate_otp()
-        st.session_state.otp_store[username] = otp
-        # In production, send OTP via email/SMS here instead of showing
-        st.info(f"OTP for {username} (for demo only): {otp}")
-        log(f"OTP generated for {user_type} '{username}'")
+        send_otp(contact_info)
 
-    otp_input = st.text_input("Enter OTP", key=f"fp_{user_type}_otp")
-    new_password = st.text_input("New Password", type="password", key=f"fp_{user_type}_newpass")
-    confirm_password = st.text_input("Confirm New Password", type="password", key=f"fp_{user_type}_confnewpass")
+    otp_input = st.text_input("Enter OTP", key=f"forgot_{user_type}_otp")
+    new_pass = st.text_input("Enter New Password", type="password", key=f"forgot_{user_type}_newpass")
+    confirm_pass = st.text_input("Confirm New Password", type="password", key=f"forgot_{user_type}_confirmpass")
 
     if st.button("Reset Password"):
-        if not username or not otp_input or not new_password or not confirm_password:
+        if not otp_input or not new_pass or not confirm_pass:
             st.warning("Fill all fields.")
             return
-        if otp_input != st.session_state.otp_store.get(username, ""):
-            st.error("Invalid OTP.")
+        if new_pass != confirm_pass:
+            st.warning("Passwords do not match.")
             return
-        if new_password != confirm_password:
-            st.error("Passwords do not match.")
-            return
-
-        store = st.session_state.admins if user_type == "admin" else st.session_state.teachers
-        if username not in store:
-            st.error(f"{user_type.capitalize()} not found.")
-            return
-
-        store[username]["password_hash"] = hash_password(new_password)
-        if user_type == "admin":
-            save_json(ADMINS_FILE, store)
-        else:
-            save_json(TEACHERS_FILE, store)
-        log(f"{user_type.capitalize()} '{username}' reset password.")
-        st.success("Password reset successful. Please login.")
-        st.session_state.otp_store.pop(username, None)
-        st.experimental_rerun()
-
-# --- Admin Panel ---
-def admin_panel():
-    st.header("Admin Dashboard")
-    st.write(f"Logged in as Admin: **{st.session_state.logged_in_user}**")
-
-    # Manage Admins
-    st.subheader("Manage Admin Users")
-    admins = st.session_state.admins
-    for admin_username in admins:
-        cols = st.columns([3, 1])
-        cols[0].write(admin_username)
-        if cols[1].button(f"Delete Admin: {admin_username}", key=f"del_admin_{admin_username}"):
-            if admin_username == st.session_state.logged_in_user:
-                st.error("You cannot delete yourself!")
+        if verify_otp(contact_info, otp_input):
+            store[username]["password_hash"] = hash_password(new_pass)
+            if user_type == "admin":
+                save_json(ADMINS_FILE, store)
             else:
-                del st.session_state.admins[admin_username]
-                save_json(ADMINS_FILE, st.session_state.admins)
-                log(f"Admin '{st.session_state.logged_in_user}' deleted admin '{admin_username}'")
-                st.success(f"Admin {admin_username} deleted.")
-                st.experimental_rerun()
+                save_json(TEACHERS_FILE, store)
+            record_log(f"{user_type.capitalize()} password reset for {username}")
+            st.success("Password reset successfully! Please login.")
+            st.session_state.rerun_flag = True
+        else:
+            st.error("Invalid OTP.")
 
-    # Manage Teachers
-    st.subheader("Manage Teachers")
-    teachers = st.session_state.teachers
-    for username, t in teachers.items():
-        cols = st.columns([3, 1])
-        cols[0].write(f"{t.get('full_name','')} ({username}) - Lab: {t.get('lab','')}")
-        if cols[1].button(f"Delete Teacher: {username}", key=f"del_teacher_{username}"):
-            del st.session_state.teachers[username]
-            save_json(TEACHERS_FILE, st.session_state.teachers)
-            log(f"Admin '{st.session_state.logged_in_user}' deleted teacher '{username}'")
-            st.success(f"Teacher {username} deleted.")
-            st.experimental_rerun()
+# ---------------- TEACHER DASHBOARD ----------------
+def teacher_dashboard():
+    st.header(f"👩‍🏫 Teacher Dashboard - {st.session_state.logged_in_user}")
+    teacher = st.session_state.logged_in_user
+    teacher_data = st.session_state.teachers.get(teacher)
 
-    st.markdown("---")
-    if st.button("Logout"):
-        logout()
+    if not teacher_data:
+        st.error("Teacher data missing, please logout and login again.")
+        return
 
-# --- Teacher Panel ---
-def teacher_panel():
-    username = st.session_state.logged_in_user
-    teachers = st.session_state.teachers
-    teacher = teachers.get(username)
+    lab = teacher_data.get("lab")
+    st.subheader(f"Lab: {lab}")
 
-    st.header(f"Teacher Dashboard — {teacher.get('full_name','')} ({username})")
-    st.write(f"Lab: **{teacher.get('lab')}**")
-
-    # Exam time settings
+    # Exam timing management
     col1, col2, col3 = st.columns(3)
     with col1:
-        exam_start = st.time_input("Exam Start Time", value=datetime.now().time(), key="exam_start")
+        exam_start = st.date_input("Exam Start Date", value=datetime.now().date(), key="exam_start_date")
+        exam_start_time = st.time_input("Start Time", value=datetime.now().time(), key="exam_start_time")
     with col2:
-        exam_end = st.time_input("Exam End Time", value=(datetime.now() + timedelta(hours=1)).time(), key="exam_end")
+        exam_end = st.date_input("Exam End Date", value=datetime.now().date(), key="exam_end_date")
+        exam_end_time = st.time_input("End Time", value=(datetime.now() + timedelta(hours=1)).time(), key="exam_end_time")
     with col3:
         if st.button("Set Exam Time"):
-            start_dt = datetime.combine(datetime.today(), exam_start)
-            end_dt = datetime.combine(datetime.today(), exam_end)
+            start_dt = datetime.combine(exam_start, exam_start_time)
+            end_dt = datetime.combine(exam_end, exam_end_time)
             if end_dt <= start_dt:
-                st.error("End time must be after start time.")
+                st.warning("End time must be after start time.")
             else:
-                teacher["exam_start"] = start_dt.isoformat()
-                teacher["exam_end"] = end_dt.isoformat()
+                teacher_data['exam_start'] = start_dt.isoformat()
+                teacher_data['exam_end'] = end_dt.isoformat()
                 save_json(TEACHERS_FILE, st.session_state.teachers)
-                st.success(f"Exam time set: {start_dt.strftime('%H:%M')} to {end_dt.strftime('%H:%M')}")
-                log(f"Teacher '{username}' set exam time {start_dt} to {end_dt}")
+                st.success(f"Exam time set: {start_dt} to {end_dt}")
+                record_log(f"Teacher {teacher} set exam time for lab {lab}: {start_dt} - {end_dt}")
+                st.session_state.rerun_flag = True
 
+    # Extend exam duration
     st.markdown("---")
+    st.subheader("Extend Exam Duration")
+    extend_minutes = st.number_input("Add minutes to exam end time", min_value=1, max_value=1440, step=10)
+    if st.button("Extend Exam"):
+        if not teacher_data.get('exam_end'):
+            st.warning("Set exam time first.")
+        else:
+            current_end = datetime.fromisoformat(teacher_data['exam_end'])
+            new_end = current_end + timedelta(minutes=extend_minutes)
+            teacher_data['exam_end'] = new_end.isoformat()
+            save_json(TEACHERS_FILE, st.session_state.teachers)
+            st.success(f"Exam extended till {new_end}")
+            record_log(f"Teacher {teacher} extended exam for lab {lab} till {new_end}")
+            st.session_state.rerun_flag = True
 
-    # Upload enable toggle
-    uploads_enabled = teacher.get("uploads_enabled", False)
-    if st.checkbox("Enable Uploads for Exam", value=uploads_enabled):
-        teacher["uploads_enabled"] = True
-    else:
-        teacher["uploads_enabled"] = False
-    save_json(TEACHERS_FILE, st.session_state.teachers)
-
-    # Generate Passcode
-    st.subheader("Generate Exam Passcode")
+    # Passcode management
+    st.markdown("---")
+    st.subheader("Exam Passcode")
     if st.button("Generate New Passcode"):
-        code = generate_passcode()
-        # Save passcode with timing info
-        start_time = datetime.fromisoformat(teacher.get("exam_start")) if teacher.get("exam_start") else datetime.now()
-        end_time = datetime.fromisoformat(teacher.get("exam_end")) if teacher.get("exam_end") else (datetime.now() + timedelta(hours=1))
-        st.session_state.exam_passcodes[code] = {
-            "teacher": username,
-            "lab": teacher["lab"],
-            "start_time": start_time.isoformat(),
-            "end_time": end_time.isoformat(),
-            "uploads_enabled": True
+        code = gen_passcode()
+        now = datetime.now()
+        start = datetime.fromisoformat(teacher_data.get('exam_start')) if teacher_data.get('exam_start') else now
+        end = datetime.fromisoformat(teacher_data.get('exam_end')) if teacher_data.get('exam_end') else now + timedelta(hours=1)
+        st.session_state.active_passcodes[code] = {
+            "teacher": teacher,
+            "lab": lab,
+            "start": start.isoformat(),
+            "end": end.isoformat()
         }
-        teacher.setdefault("passcodes", []).append(code)
+        st.success(f"New Passcode: {code}")
+        record_log(f"Teacher {teacher} generated passcode {code} for lab {lab}")
+
+    st.write("Active Passcodes:")
+    for code, info in st.session_state.active_passcodes.items():
+        if info["teacher"] == teacher:
+            st.write(f"- {code}: Valid from {info['start']} to {info['end']}")
+
+    # Upload enable/disable
+    uploads_allowed = teacher_data.get("uploads_allowed", True)
+    if st.button("Toggle Uploads (Currently: {})".format("Enabled" if uploads_allowed else "Disabled")):
+        teacher_data["uploads_allowed"] = not uploads_allowed
         save_json(TEACHERS_FILE, st.session_state.teachers)
-        st.success(f"Generated passcode: {code} (valid from {start_time.strftime('%H:%M')} to {end_time.strftime('%H:%M')})")
-        log(f"Teacher '{username}' generated passcode '{code}'")
+        st.success(f"Uploads {'enabled' if not uploads_allowed else 'disabled'}.")
+        st.session_state.rerun_flag = True
 
-    # List existing passcodes
-    st.subheader("Existing Exam Passcodes")
-    passcodes = teacher.get("passcodes", [])
-    for pc in passcodes:
-        info = st.session_state.exam_passcodes.get(pc)
-        if not info:
-            continue
-        st.write(f"Passcode: {pc} | Valid from {datetime.fromisoformat(info['start_time']).strftime('%H:%M')} to {datetime.fromisoformat(info['end_time']).strftime('%H:%M')}")
-
+    # Submissions management
     st.markdown("---")
-    # View submissions
     st.subheader("Student Submissions")
 
-    lab_folder = os.path.join(SUBMISSIONS_DIR, teacher["lab"])
+    lab_folder = os.path.join(SUBMISSIONS_ROOT, lab)
     ensure_dir(lab_folder)
+    files = walk_lab_files(lab_folder)
 
-    # Build submissions list
-    submissions = []
-    if teacher["lab"] in st.session_state.submissions_index:
-        for student_id, data in st.session_state.submissions_index[teacher["lab"]].items():
-            for fpath in data.get("files", []):
-                filename = os.path.basename(fpath)
-                submissions.append((student_id, filename, fpath))
-
-    if not submissions:
+    if not files:
         st.info("No submissions yet.")
     else:
-        selected_files = st.multiselect("Select submissions", [f"{sid} - {fname}" for sid, fname, _ in submissions])
-        selected_paths = [fpath for sid, fname, fpath in submissions if f"{sid} - {fname}" in selected_files]
+        sel_all = st.checkbox("Select All Submissions")
+        display_list = [f["display"] for f in files]
+        if sel_all:
+            selected = st.multiselect("Selected Files", display_list, default=display_list)
+        else:
+            selected = st.multiselect("Selected Files", display_list)
 
-        col1, col2, col3 = st.columns(3)
+        selected_paths = [f["path"] for f in files if f["display"] in selected]
 
-        with col1:
-            if st.button("Download Selected"):
-                for path in selected_paths:
-                    with open(path, "rb") as file:
-                        st.download_button(f"Download {os.path.basename(path)}", file.read(), file_name=os.path.basename(path))
-        with col2:
-            if st.button("Download Selected as ZIP"):
-                if selected_paths:
-                    tmp_zip = tempfile.NamedTemporaryFile(delete=False, suffix=".zip")
-                    zip_files(selected_paths, tmp_zip.name)
-                    with open(tmp_zip.name, "rb") as fzip:
-                        st.download_button("Download ZIP", fzip.read(), file_name=f"{teacher['lab']}_submissions.zip")
-                    os.unlink(tmp_zip.name)
-                else:
-                    st.warning("Select files first.")
-        with col3:
-            dest_folder = st.text_input("Copy to folder (absolute path)")
-            if st.button("Copy Selected to Folder"):
-                if not selected_paths:
-                    st.warning("Select files first.")
-                elif not dest_folder:
-                    st.warning("Enter destination folder path.")
-                else:
-                    try:
-                        ensure_dir(dest_folder)
-                        for fpath in selected_paths:
-                            shutil.copy(fpath, dest_folder)
-                        st.success(f"Copied {len(selected_paths)} files to {dest_folder}")
-                        log(f"Teacher '{username}' copied {len(selected_paths)} files to {dest_folder}")
-                    except Exception as e:
-                        st.error(f"Copy failed: {e}")
+        for f in files:
+            with st.expander(f["display"]):
+                with open(f["path"], "rb") as fh:
+                    st.download_button(label="Download File", data=fh, file_name=f["filename"])
 
-    st.markdown("---")
+        # Copy to folder on server or USB (path must be accessible)
+        st.markdown("### Copy Selected Submissions")
+        dest = st.text_input("Destination Folder Path (absolute)")
+        if st.button("Copy Selected Files"):
+            if not selected_paths:
+                st.warning("Select files first.")
+            elif not dest:
+                st.warning("Enter destination path.")
+            else:
+                try:
+                    ensure_dir(dest)
+                    count = 0
+                    for p in selected_paths:
+                        shutil.copy(p, dest)
+                        count += 1
+                    st.success(f"Copied {count} files to {dest}")
+                    record_log(f"Teacher {teacher} copied {count} files to {dest}")
+                except Exception as e:
+                    st.error(f"Copy failed: {e}")
+
+        # Download selected as ZIP
+        if st.button("Download Selected as ZIP"):
+            if not selected_paths:
+                st.warning("Select files first.")
+            else:
+                tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".zip")
+                with zipfile.ZipFile(tmp.name, "w") as zf:
+                    for p in selected_paths:
+                        zf.write(p, arcname=os.path.basename(p))
+                with open(tmp.name, "rb") as zf:
+                    st.download_button("Download ZIP", zf.read(), file_name=f"submissions_{lab}.zip")
+                os.unlink(tmp.name)
+
+    # Logout button
     if st.button("Logout"):
         logout()
 
-# --- Student Portal ---
+# ---------------- STUDENT PORTAL ----------------
 def student_portal():
-    st.header("Student Exam Submission")
+    st.header("🎓 Student Exam Submission")
 
     teachers = st.session_state.teachers
     if not teachers:
-        st.warning("No teachers registered. Contact your instructor.")
+        st.info("No teachers registered yet. Please contact your instructor.")
         return
 
-    teacher_usernames = list(teachers.keys())
-    selected_teacher = st.selectbox("Select your Teacher", ["-- Select --"] + teacher_usernames)
-    if selected_teacher == "-- Select --":
-        st.stop()
+    teacher_list = list(teachers.keys())
+    teacher_choice = st.selectbox("Select Teacher", ["-- Select --"] + teacher_list)
+    passcode = st.text_input("Enter Exam Passcode (provided by teacher)")
+    student_id = st.text_input("Enter Your Unique Student ID")
+    uploaded = st.file_uploader("Upload Your Answer File (PDF or DOCX)", type=["pdf", "docx"])
 
-    passcode = st.text_input("Enter Exam Passcode", max_chars=8)
-    student_id = st.text_input("Enter your Student ID (Unique)")
-    uploaded_file = st.file_uploader("Upload your Answer File (PDF or DOCX)", type=["pdf", "docx"])
+    server_ip = get_server_ip()
 
-    # Show exam timer countdown if passcode valid
-    now = datetime.now()
-    passcode_info = st.session_state.exam_passcodes.get(passcode)
-
-    if passcode_info:
-        start_time = datetime.fromisoformat(passcode_info["start_time"])
-        end_time = datetime.fromisoformat(passcode_info["end_time"])
-        if start_time <= now <= end_time:
-            remaining = end_time - now
-            st.info(f"Exam Time Remaining: {str(remaining).split('.')[0]}")
+    # Show countdown timer if passcode valid and exam active
+    if passcode in st.session_state.active_passcodes:
+        pass_info = st.session_state.active_passcodes[passcode]
+        now = datetime.now()
+        start = datetime.fromisoformat(pass_info['start'])
+        end = datetime.fromisoformat(pass_info['end'])
+        if start <= now <= end:
+            remaining = end - now
+            st.info(f"Time Remaining: {str(remaining).split('.')[0]} (HH:MM:SS)")
         else:
-            st.error("Exam is not active for this passcode.")
-            return
-    else:
-        if passcode:
-            st.error("Invalid passcode.")
-        return
+            st.warning("Exam is not active at this time for this passcode.")
 
-    # Submit button
     if st.button("Submit Paper"):
-        if selected_teacher not in teachers:
-            st.error("Invalid teacher selection.")
+        if teacher_choice == "-- Select --" or not teacher_choice:
+            st.warning("Please select your teacher.")
             return
-        if not passcode or not student_id or not uploaded_file:
-            st.error("Please fill all fields and upload your file.")
+        if passcode not in st.session_state.active_passcodes:
+            st.error("Invalid or expired passcode.")
             return
-
-        teacher_obj = teachers[selected_teacher]
-        lab = teacher_obj.get("lab")
-
-        # Check if uploads enabled
-        if not teacher_obj.get("uploads_enabled", False):
-            st.error("Uploads are not enabled by the teacher at this time.")
+        pass_info = st.session_state.active_passcodes[passcode]
+        if pass_info["teacher"] != teacher_choice:
+            st.error("Passcode does not match selected teacher.")
             return
+        teacher_data = st.session_state.teachers[teacher_choice]
 
-        # Check passcode matches teacher and exam is active
-        if passcode not in teacher_obj.get("passcodes", []):
-            st.error("Passcode does not belong to the selected teacher.")
-            return
-
-        # Duplicate submission check by student ID or IP
-        student_lab_subs = st.session_state.submissions_index.setdefault(lab, {})
-        existing = student_lab_subs.get(student_id)
-        ip = get_client_ip()
-
-        if existing:
-            st.error("You have already submitted your exam.")
+        # Check if exam is active
+        now = datetime.now()
+        start = datetime.fromisoformat(pass_info['start'])
+        end = datetime.fromisoformat(pass_info['end'])
+        if not (start <= now <= end):
+            st.error("Exam is not active right now.")
             return
 
-        # Check if IP already submitted
-        for sid, data in student_lab_subs.items():
-            if data.get("ip") == ip:
-                st.error("This device/IP has already submitted an exam.")
-                return
+        # Check if uploads allowed by teacher
+        if not teacher_data.get("uploads_allowed", True):
+            st.error("Uploads are disabled by the teacher.")
+            return
 
-        # Save file
-        lab_folder = os.path.join(SUBMISSIONS_DIR, lab)
+        if not student_id or not uploaded:
+            st.warning("Student ID and answer file are required.")
+            return
+
+        # Prevent duplicate submission by student id or IP
+        lab = teacher_data["lab"]
+        lab_folder = os.path.join(SUBMISSIONS_ROOT, lab)
         ensure_dir(lab_folder)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        safe_filename = f"{student_id}_{timestamp}_{uploaded_file.name}"
-        save_path = os.path.join(lab_folder, safe_filename)
 
-        with open(save_path, "wb") as f:
-            f.write(uploaded_file.getbuffer())
+        # Check if student_id or IP has submitted
+        existing_submissions = walk_lab_files(lab_folder)
+        for f in existing_submissions:
+            if f["student"] == student_id:
+                st.error("You have already submitted your paper.")
+                return
+            # You could store IP per submission in a metadata file if needed for IP check
+            # This example assumes no IP tracking per submission
 
-        # Save submission index
-        student_lab_subs[student_id] = {
-            "ip": ip,
-            "files": [save_path],
-            "submitted_at": datetime.now().isoformat()
-        }
+        # Save uploaded file
+        student_folder = os.path.join(lab_folder, student_id)
+        ensure_dir(student_folder)
+        filepath = os.path.join(student_folder, uploaded.name)
+        with open(filepath, "wb") as f:
+            f.write(uploaded.getbuffer())
 
-        st.session_state.submissions_index[lab] = student_lab_subs
-        log(f"Student {student_id} submitted exam for lab '{lab}' (Teacher: {selected_teacher}) from IP {ip}")
-        st.success("Submission successful!")
-        st.experimental_rerun()
+        record_log(f"Student {student_id} submitted file {uploaded.name} for lab {lab} under teacher {teacher_choice}")
+        st.success("Submission successful. Good luck!")
 
-# --- Main App Navigation ---
+# ---------------- ADMIN DASHBOARD ----------------
+def admin_dashboard():
+    st.header(f"🛠️ Admin Dashboard - {st.session_state.logged_in_user}")
+    st.write("Manage Admins and Teachers")
+
+    st.subheader("Admins")
+    admins = st.session_state.admins
+    for a in admins:
+        st.write(f"- {a}")
+    st.markdown("---")
+
+    st.subheader("Teachers")
+    teachers = st.session_state.teachers
+    for t, data in teachers.items():
+        st.write(f"- {t} (Lab: {data.get('lab', 'N/A')})")
+
+    st.markdown("---")
+    st.write("You can manage teachers and admins via registration forms on the login page.")
+
+    if st.button("Logout"):
+        logout()
+
+# ---------------- MAIN APP ----------------
 def main():
-    st.title("Professional Lab Exam Portal")
+    rerun_if_flagged()
 
-    if st.session_state.logged_in_user:
-        role = st.session_state.logged_in_role
-        if role == "admin":
-            admin_panel()
-        elif role == "teacher":
-            teacher_panel()
-    else:
-        menu = ["Student Portal", "Admin Login", "Teacher Login", "Admin Register", "Teacher Register", "Forgot Password"]
-        choice = st.sidebar.selectbox("Menu", menu)
+    menu = ["Home", "Admin Login", "Teacher Login", "Student Portal", "Register", "Forgot Password"]
+    choice = st.sidebar.selectbox("Navigation", menu)
 
-        if choice == "Student Portal":
-            student_portal()
+    try:
+        if choice == "Home":
+            st.write("Welcome to the Professional Lab Exam Portal. Please select your role from the sidebar.")
 
         elif choice == "Admin Login":
-            login_user("admin")
+            if st.session_state.logged_in_role == "admin":
+                admin_dashboard()
+            else:
+                login_user("admin")
 
         elif choice == "Teacher Login":
-            login_user("teacher")
+            if st.session_state.logged_in_role == "teacher":
+                teacher_dashboard()
+            else:
+                login_user("teacher")
 
-        elif choice == "Admin Register":
-            register_user("admin")
+        elif choice == "Student Portal":
+            student_portal()
 
-        elif choice == "Teacher Register":
-            register_user("teacher")
+        elif choice == "Register":
+            role = st.radio("Register as", ["Admin", "Teacher"])
+            register_user(role.lower())
 
         elif choice == "Forgot Password":
-            user_type = st.selectbox("Select user type", ["admin", "teacher"])
-            forgot_password_flow(user_type)
+            role = st.radio("Reset password for", ["Admin", "Teacher"])
+            forgot_password_flow(role.lower())
+
+        # Logout if logged in user clicks logout button
+        if st.session_state.logged_in_user and st.session_state.logged_in_role:
+            if st.sidebar.button("Logout"):
+                logout()
+
+    except Exception as e:
+        st.error(f"Unexpected error: {e}")
+        record_log(f"ERROR: {e}")
 
 if __name__ == "__main__":
     main()
