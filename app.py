@@ -1,168 +1,130 @@
 import streamlit as st
 import os
-import json
-import time
-import shutil
-from datetime import datetime, timedelta
-from tkinter import Tk, filedialog
+import datetime
+import random
+import string
 
-# ---------------- CONFIG ----------------
-UPLOAD_FOLDER = "submissions"
-TEACHER_FILE = "teachers.json"
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+# ----------------- Data Storage -----------------
+if "teachers" not in st.session_state:
+    st.session_state.teachers = {}
+if "logged_in_teacher" not in st.session_state:
+    st.session_state.logged_in_teacher = None
+if "passcode" not in st.session_state:
+    st.session_state.passcode = None
+if "exam_folder" not in st.session_state:
+    st.session_state.exam_folder = "Lab_Exams"
 
-# Load teacher data
-if os.path.exists(TEACHER_FILE):
-    with open(TEACHER_FILE, "r") as f:
-        teachers = json.load(f)
-else:
-    teachers = {}
-    with open(TEACHER_FILE, "w") as f:
-        json.dump(teachers, f)
+# ----------------- Helper Functions -----------------
+def generate_passcode(length=6):
+    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=length))
 
-# ---------------- APP TITLE ----------------
-st.title("📘 SZABIST Exam Portal (Auto File Copy Version)")
+def ensure_folder(path):
+    if not os.path.exists(path):
+        os.makedirs(path)
 
-menu = st.sidebar.radio("Select User Type", ["Student", "Teacher"])
+# ----------------- Signup & Login -----------------
+def signup_teacher():
+    st.title("👩‍🏫 Teacher Signup")
+    name = st.text_input("Enter Full Name")
+    username = st.text_input("Choose Username")
+    password = st.text_input("Choose Password", type="password")
+    if st.button("Register"):
+        if username in st.session_state.teachers:
+            st.warning("Username already exists.")
+        elif not username or not password:
+            st.warning("All fields are required.")
+        else:
+            st.session_state.teachers[username] = {"password": password, "name": name}
+            st.success("Registration successful! Please log in now.")
 
-# ---------------- STUDENT SECTION ----------------
-if menu == "Student":
-    st.header("🧑‍🎓 Student Upload Portal")
+def login_teacher():
+    st.title("👨‍🏫 Teacher Login")
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
+    if st.button("Login"):
+        if username in st.session_state.teachers and st.session_state.teachers[username]["password"] == password:
+            st.session_state.logged_in_teacher = username
+            st.success(f"Welcome {st.session_state.teachers[username]['name']}!")
+        else:
+            st.error("Invalid username or password")
 
-    teacher_usernames = list(teachers.keys())
-    if teacher_usernames:
-        selected_teacher = st.selectbox("Select Your Teacher", teacher_usernames)
-        passcode = st.text_input("Enter Passcode (Provided by Teacher):")
+def forgot_password():
+    st.title("🔑 Reset Password")
+    username = st.text_input("Enter your registered username")
+    if st.button("Recover"):
+        if username in st.session_state.teachers:
+            st.info(f"Your password is: {st.session_state.teachers[username]['password']}")
+        else:
+            st.error("Username not found!")
 
-        if selected_teacher in teachers:
-            teacher_data = teachers[selected_teacher]
-            allowed = teacher_data.get("uploads_allowed", True)
-            deadline = teacher_data.get("exam_deadline")
-            lab = teacher_data.get("lab")
+# ----------------- Teacher Dashboard -----------------
+def teacher_dashboard():
+    st.sidebar.title(f"Welcome {st.session_state.teachers[st.session_state.logged_in_teacher]['name']}")
+    if st.sidebar.button("Logout"):
+        st.session_state.logged_in_teacher = None
+        st.experimental_rerun()
 
-            if deadline:
-                deadline_time = datetime.fromisoformat(deadline)
-                remaining = (deadline_time - datetime.now()).total_seconds()
-                if remaining > 0:
-                    st.info(f"⏳ Time remaining: {int(remaining // 60)} minutes")
-                else:
-                    st.error("⏰ Exam time is over.")
-                    allowed = False
+    st.header("📚 Teacher Dashboard")
 
-            if allowed:
-                if passcode == teacher_data.get("passcode"):
-                    student_id = st.text_input("Enter your Student ID:")
-                    uploaded_file = st.file_uploader("Upload Exam File (PDF or DOCX):", type=["pdf", "docx"])
+    # Select Lab Folder
+    lab_name = st.text_input("Enter Lab Name (e.g., Lab1, Lab2, Lab3)")
+    folder_path = os.path.join(st.session_state.exam_folder, st.session_state.logged_in_teacher, lab_name)
+    ensure_folder(folder_path)
 
-                    if st.button("Submit Paper"):
-                        if student_id and uploaded_file:
-                            lab_folder = os.path.join(UPLOAD_FOLDER, lab)
-                            os.makedirs(lab_folder, exist_ok=True)
-                            student_folder = os.path.join(lab_folder, student_id)
-                            os.makedirs(student_folder, exist_ok=True)
+    # Generate Passcode
+    if st.button("Generate Passcode for Students"):
+        st.session_state.passcode = generate_passcode()
+        st.success(f"Passcode: {st.session_state.passcode}")
 
-                            serial = len(os.listdir(lab_folder)) + 1
-                            file_path = os.path.join(student_folder, f"{serial}_{uploaded_file.name}")
+    # Set Duration
+    duration = st.number_input("Set Exam Duration (minutes)", min_value=10, max_value=180, value=60)
 
-                            with open(file_path, "wb") as f:
-                                f.write(uploaded_file.getbuffer())
+    # Extend time
+    if st.button("Extend Time by 10 Minutes"):
+        duration += 10
+        st.info(f"New Duration: {duration} minutes")
 
-                            st.success(f"✅ Paper uploaded (Serial #{serial}) at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-                        else:
-                            st.warning("⚠️ Please enter ID and upload file.")
-                elif passcode:
-                    st.error("❌ Invalid passcode.")
-            else:
-                st.warning("🚫 Uploads are disabled by your teacher.")
+    # View Uploaded Papers
+    st.subheader("📄 Submitted Papers")
+    files = os.listdir(folder_path)
+    if files:
+        for i, f in enumerate(files, 1):
+            st.write(f"{i}. {f}")
     else:
-        st.info("📭 No registered teachers yet.")
+        st.info("No papers submitted yet.")
 
-# ---------------- TEACHER SECTION ----------------
-elif menu == "Teacher":
-    st.header("👩‍🏫 Teacher Control Panel")
+# ----------------- Student Portal -----------------
+def student_portal():
+    st.title("🎓 Student Portal")
+    passcode = st.text_input("Enter Passcode Given by Teacher")
 
-    auth_choice = st.radio("Select Action", ["Login", "Sign Up", "Forgot Password"])
+    if passcode == st.session_state.passcode and st.session_state.logged_in_teacher:
+        teacher_folder = os.path.join(st.session_state.exam_folder, st.session_state.logged_in_teacher)
+        lab_name = st.text_input("Enter Lab Name Provided by Teacher")
+        upload_folder = os.path.join(teacher_folder, lab_name)
+        ensure_folder(upload_folder)
 
-    # ---------- SIGNUP ----------
-    if auth_choice == "Sign Up":
-        new_username = st.text_input("Choose Username:")
-        new_password = st.text_input("Choose Password:", type="password")
-        lab_name = st.text_input("Enter Lab Name (e.g., Lab1):")
+        uploaded_file = st.file_uploader("Upload your paper (PDF or Word)", type=["pdf", "docx", "doc"])
+        if uploaded_file is not None:
+            save_path = os.path.join(upload_folder, uploaded_file.name)
+            with open(save_path, "wb") as f:
+                f.write(uploaded_file.read())
+            st.success("✅ File submitted successfully!")
+    else:
+        st.warning("Please enter a valid passcode to submit.")
 
-        if st.button("Register"):
-            if new_username in teachers:
-                st.warning("⚠️ Username already exists.")
-            elif new_username and new_password and lab_name:
-                teachers[new_username] = {
-                    "password": new_password,
-                    "lab": lab_name,
-                    "uploads_allowed": True,
-                    "passcode": None,
-                    "exam_deadline": None
-                }
-                with open(TEACHER_FILE, "w") as f:
-                    json.dump(teachers, f)
-                st.success("✅ Registered successfully.")
-            else:
-                st.warning("⚠️ Please fill all fields.")
+# ----------------- App Navigation -----------------
+st.sidebar.title("Navigation")
+menu = st.sidebar.radio("Go to", ["Teacher Login", "Teacher Signup", "Forgot Password", "Student Portal"])
 
-    # ---------- LOGIN ----------
-    elif auth_choice == "Login":
-        username = st.text_input("Username:")
-        password = st.text_input("Password:", type="password")
-
-        if st.button("Login"):
-            if username in teachers and teachers[username]["password"] == password:
-                st.session_state.logged_in = True
-                st.session_state.teacher = username
-                st.success(f"✅ Welcome {username}")
-                st.rerun()
-            else:
-                st.error("❌ Invalid credentials.")
-
-        # After successful login
-        if st.session_state.get("logged_in") and st.session_state.get("teacher") == username:
-            teacher_data = teachers[username]
-            lab = teacher_data["lab"]
-            lab_folder = os.path.join(UPLOAD_FOLDER, lab)
-            os.makedirs(lab_folder, exist_ok=True)
-
-            st.subheader(f"📂 Lab: {lab}")
-
-            # View Submissions
-            if os.path.exists(lab_folder):
-                students = os.listdir(lab_folder)
-                if students:
-                    selected_students = st.multiselect("Select student(s) to copy files:", students)
-
-                    if st.button("📂 Select Destination Folder and Copy"):
-                        if selected_students:
-                            # Open folder picker using Tkinter
-                            root = Tk()
-                            root.withdraw()
-                            destination = filedialog.askdirectory(title="Select Destination Folder")
-                            root.destroy()
-
-                            if destination:
-                                total_copied = 0
-                                for stu in selected_students:
-                                    student_files = os.listdir(os.path.join(lab_folder, stu))
-                                    for file in student_files:
-                                        src = os.path.join(lab_folder, stu, file)
-                                        shutil.copy(src, destination)
-                                        total_copied += 1
-                                st.success(f"✅ {total_copied} file(s) copied successfully to:\n📁 {destination}")
-                            else:
-                                st.warning("⚠️ No destination folder selected.")
-                        else:
-                            st.warning("⚠️ Please select at least one student.")
-                else:
-                    st.info("No submissions yet.")
-            else:
-                st.info("No lab submissions found.")
-
-            # Logout
-            if st.button("🚪 Logout"):
-                st.session_state.logged_in = False
-                st.session_state.teacher = None
-                st.rerun()
+if menu == "Teacher Signup":
+    signup_teacher()
+elif menu == "Teacher Login":
+    if st.session_state.logged_in_teacher:
+        teacher_dashboard()
+    else:
+        login_teacher()
+elif menu == "Forgot Password":
+    forgot_password()
+elif menu == "Student Portal":
+    student_portal()
