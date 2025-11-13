@@ -1,245 +1,237 @@
 import streamlit as st
 import sqlite3
-import os
 import hashlib
-from datetime import datetime, time, timedelta
-from io import BytesIO
+import datetime
+import os
 import zipfile
-import socket
-import random
-import string
+from io import BytesIO
 
-# ===========================
-# DATABASE INITIALIZATION
-# ===========================
-DB_PATH = "lab_exam.db"
-if not os.path.exists(DB_PATH):
+DB_PATH = "exam_app.db"
+UPLOAD_DIR = "uploads"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+# ---------------- Database Setup ----------------
+def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("""
-        CREATE TABLE teachers (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE,
-            password TEXT,
-            email TEXT
-        )
-    """)
-    c.execute("""
-        CREATE TABLE exams (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            teacher_id INTEGER,
-            title TEXT,
-            passcode TEXT,
-            start_time TEXT,
-            end_time TEXT
-        )
-    """)
-    c.execute("""
-        CREATE TABLE submissions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            exam_id INTEGER,
-            student_id TEXT,
-            ip_address TEXT,
-            filename TEXT,
-            file_data BLOB,
-            timestamp TEXT
-        )
-    """)
+    c.execute('''CREATE TABLE IF NOT EXISTS teachers (
+                    username TEXT PRIMARY KEY,
+                    password_hash TEXT)''')
+
+    c.execute('''CREATE TABLE IF NOT EXISTS exams (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    teacher TEXT,
+                    lab_name TEXT,
+                    passcode TEXT,
+                    start_time TEXT,
+                    end_time TEXT,
+                    active INTEGER)''')
+
+    c.execute('''CREATE TABLE IF NOT EXISTS submissions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    teacher TEXT,
+                    lab_name TEXT,
+                    student_id TEXT,
+                    ip TEXT,
+                    filename TEXT,
+                    timestamp TEXT)''')
     conn.commit()
     conn.close()
 
-# ===========================
-# UTILITY FUNCTIONS
-# ===========================
+init_db()
+
+# ---------------- Helper Functions ----------------
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
-def verify_password(password, hashed):
-    return hash_password(password) == hashed
+def verify_password(password, hash_):
+    return hash_password(password) == hash_
 
-def get_ip():
-    try:
-        return socket.gethostbyname(socket.gethostname())
-    except:
-        return "Unknown"
+def get_client_ip():
+    return st.session_state.get("client_ip", f"local-{os.urandom(4).hex()}")
 
-def get_db_connection():
-    return sqlite3.connect(DB_PATH)
+def get_active_exam(teacher):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT * FROM exams WHERE teacher=? AND active=1", (teacher,))
+    exam = c.fetchone()
+    conn.close()
+    return exam
 
-def generate_passcode():
-    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
-
-# ===========================
-# TEACHER MODULE
-# ===========================
+# ---------------- Teacher Functions ----------------
 def teacher_register():
-    st.subheader("🧑‍🏫 Teacher Registration")
+    st.subheader("👩‍🏫 Teacher Registration")
     username = st.text_input("Username")
-    email = st.text_input("Email")
     password = st.text_input("Password", type="password")
-
     if st.button("Register"):
-        if not username or not password:
-            st.warning("⚠️ Please fill all fields.")
-            return
-        conn = get_db_connection()
+        conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         try:
-            c.execute("INSERT INTO teachers (username, email, password) VALUES (?, ?, ?)",
-                      (username, email, hash_password(password)))
+            c.execute("INSERT INTO teachers VALUES (?, ?)", (username, hash_password(password)))
             conn.commit()
-            st.success("✅ Registration successful! You can now login.")
+            st.success("✅ Registration successful! Please login.")
         except sqlite3.IntegrityError:
-            st.error("⚠️ Username already exists.")
+            st.error("❌ Username already exists.")
         conn.close()
 
 def teacher_login():
-    st.subheader("🔐 Teacher Login")
+    st.subheader("👩‍🏫 Teacher Login")
     username = st.text_input("Username")
     password = st.text_input("Password", type="password")
-
     if st.button("Login"):
-        conn = get_db_connection()
+        conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        c.execute("SELECT id, password FROM teachers WHERE username=?", (username,))
-        result = c.fetchone()
+        c.execute("SELECT password_hash FROM teachers WHERE username=?", (username,))
+        record = c.fetchone()
         conn.close()
-
-        if result and verify_password(password, result[1]):
-            st.session_state["teacher_id"] = result[0]
-            st.session_state["teacher_username"] = username
-            st.session_state["logged_in"] = True
+        if record and verify_password(password, record[0]):
+            st.session_state["teacher"] = username
+            st.session_state["page"] = "teacher_dashboard"
         else:
-            st.error("❌ Invalid credentials.")
+            st.error("❌ Invalid username or password")
 
 def teacher_dashboard():
-    st.subheader(f"🎓 Welcome, {st.session_state['teacher_username']}")
-    teacher_id = st.session_state["teacher_id"]
-    conn = get_db_connection()
-    c = conn.cursor()
+    st.header(f"Teacher Dashboard - {st.session_state['teacher']}")
+    st.subheader("🧪 Create / Manage Exam")
 
-    st.markdown("### 🧾 Create New Exam")
-    title = st.text_input("Exam Title")
-    start_time = st.time_input("Start Time", time(9, 0))
-    end_time = st.time_input("End Time", time(10, 0))
-
+    lab_name = st.text_input("Lab Name")
+    passcode = st.text_input("Exam Passcode")
+    start_time = st.time_input("Start Time", datetime.time(9, 0))
+    end_time = st.time_input("End Time", datetime.time(10, 0))
+    
     if st.button("Create Exam"):
-        now = datetime.now()
-        start = datetime.combine(datetime.today(), start_time)
-        end = datetime.combine(datetime.today(), end_time)
-        if end <= start:
-            end += timedelta(days=1)
-        passcode = generate_passcode()
-
-        c.execute("INSERT INTO exams (teacher_id, title, passcode, start_time, end_time) VALUES (?, ?, ?, ?, ?)",
-                  (teacher_id, title, passcode, str(start), str(end)))
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("INSERT INTO exams (teacher, lab_name, passcode, start_time, end_time, active) VALUES (?, ?, ?, ?, ?, 0)",
+                  (st.session_state["teacher"], lab_name, passcode, str(start_time), str(end_time)))
         conn.commit()
-        st.success(f"✅ Exam '{title}' created successfully!")
-        st.info(f"👉 Copy this Passcode manually and share with students: **{passcode}**")
-
+        conn.close()
+        st.success("✅ Exam created successfully! Passcode saved privately.")
+    
     st.divider()
-    st.markdown("### 📂 Your Exams")
-    c.execute("SELECT id, title, passcode, start_time, end_time FROM exams WHERE teacher_id=?", (teacher_id,))
+    st.subheader("⚙️ Manage Existing Exams")
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT * FROM exams WHERE teacher=?", (st.session_state["teacher"],))
     exams = c.fetchall()
+    conn.close()
 
     for ex in exams:
-        exam_id, title, passcode, start, end = ex
-        st.markdown(f"**{title}**  \n🕒 {start} → {end}")
-        if st.button(f"View Submissions ({title})", key=f"view_{exam_id}"):
-            show_submissions(exam_id)
+        ex_id, teacher, lab_name, passcode, stime, etime, active = ex
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.write(f"📘 {lab_name}")
+        with col2:
+            st.write(f"🕒 {stime} - {etime}")
+        with col3:
+            st.write("🟢 Active" if active else "🔴 Inactive")
+        with col4:
+            if st.button("Toggle Active", key=f"toggle_{ex_id}"):
+                conn = sqlite3.connect(DB_PATH)
+                c = conn.cursor()
+                c.execute("UPDATE exams SET active=? WHERE id=?", (0 if active else 1, ex_id))
+                conn.commit()
+                conn.close()
+                st.rerun()
 
-    conn.close()
+    st.divider()
+    st.subheader("📁 View & Download Submissions")
 
-def show_submissions(exam_id):
-    st.markdown("### 📁 Student Submissions")
-    conn = get_db_connection()
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT student_id, filename, timestamp FROM submissions WHERE exam_id=?", (exam_id,))
-    data = c.fetchall()
-
-    if not data:
-        st.info("No submissions yet.")
-        return
-
-    for sid, fname, ts in data:
-        st.write(f"📄 {fname} | 🧑 {sid} | ⏰ {ts}")
-
-    if st.button("Download All as ZIP"):
-        zip_buffer = BytesIO()
-        with zipfile.ZipFile(zip_buffer, "w") as zipf:
-            c.execute("SELECT student_id, filename, file_data FROM submissions WHERE exam_id=?", (exam_id,))
-            for sid, fname, fdata in c.fetchall():
-                zipf.writestr(f"{sid}_{fname}", fdata)
-        zip_buffer.seek(0)
-        st.download_button("⬇️ Download ZIP", zip_buffer, file_name="submissions.zip")
-
+    c.execute("SELECT DISTINCT lab_name FROM submissions WHERE teacher=?", (st.session_state["teacher"],))
+    labs = [x[0] for x in c.fetchall()]
     conn.close()
 
-# ===========================
-# STUDENT MODULE
-# ===========================
-def student_portal():
-    st.subheader("🎓 Student Exam Portal")
-    entered_pass = st.text_input("Enter Exam Passcode to Join")
-
-    if entered_pass:
-        conn = get_db_connection()
+    if labs:
+        lab_choice = st.selectbox("Select Lab", labs)
+        conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        c.execute("SELECT id, title, start_time, end_time FROM exams WHERE passcode=?", (entered_pass,))
+        c.execute("SELECT student_id, filename, timestamp FROM submissions WHERE teacher=? AND lab_name=?",
+                  (st.session_state["teacher"], lab_choice))
+        records = c.fetchall()
+        conn.close()
+
+        for r in records:
+            st.write(f"👨‍🎓 {r[0]} — {r[1]} — {r[2]}")
+        
+        if st.button("Download All as ZIP"):
+            zip_buffer = BytesIO()
+            with zipfile.ZipFile(zip_buffer, "w") as zf:
+                for r in records:
+                    file_path = os.path.join(UPLOAD_DIR, r[1])
+                    if os.path.exists(file_path):
+                        zf.write(file_path, arcname=r[1])
+            st.download_button("Download ZIP", data=zip_buffer.getvalue(), file_name=f"{lab_choice}_submissions.zip")
+    else:
+        st.info("No submissions yet.")
+
+# ---------------- Student Portal ----------------
+def student_portal():
+    st.header("🎓 Student Exam Portal")
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT DISTINCT teacher FROM exams")
+    teachers = [x[0] for x in c.fetchall()]
+    conn.close()
+
+    teacher = st.selectbox("Select Teacher", teachers)
+    passcode = st.text_input("Enter Exam Passcode")
+    student_id = st.text_input("Enter Student ID")
+    file = st.file_uploader("Upload your answer file", type=["zip", "pdf", "docx", "txt"])
+
+    if st.button("Submit"):
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT * FROM exams WHERE teacher=? AND passcode=? AND active=1", (teacher, passcode))
         exam = c.fetchone()
 
         if not exam:
-            st.error("❌ Invalid passcode.")
-            return
-
-        exam_id, title, start, end = exam
-        now = datetime.now()
-        start = datetime.fromisoformat(start)
-        end = datetime.fromisoformat(end)
-
-        if not (start <= now <= end):
-            st.warning("⏳ Exam is not active right now.")
-            return
-
-        st.success(f"✅ Joined Exam: {title}")
-        student_id = st.text_input("Enter Your Student ID")
-        file = st.file_uploader("Upload Answer File (.pdf or .docx)", type=["pdf", "docx"])
-
-        if st.button("Submit Paper"):
-            ip = get_ip()
-            c.execute("SELECT * FROM submissions WHERE exam_id=? AND (student_id=? OR ip_address=?)",
-                      (exam_id, student_id, ip))
-            if c.fetchone():
-                st.error("⚠️ You have already submitted.")
-            elif file:
-                file_data = file.read()
-                c.execute("INSERT INTO submissions (exam_id, student_id, ip_address, filename, file_data, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
-                          (exam_id, student_id, ip, file.name, file_data, str(datetime.now())))
-                conn.commit()
-                st.success("✅ Submission successful!")
+            st.error("❌ Exam not active or invalid passcode.")
+        else:
+            _, _, lab_name, _, stime, etime, active = exam
+            now = datetime.datetime.now().time()
+            if not (datetime.time.fromisoformat(stime) <= now <= datetime.time.fromisoformat(etime)):
+                st.error("❌ Not within exam time window.")
             else:
-                st.warning("Please upload a file.")
+                ip = get_client_ip()
+                c.execute("SELECT * FROM submissions WHERE teacher=? AND lab_name=? AND (student_id=? OR ip=?)",
+                          (teacher, lab_name, student_id, ip))
+                if c.fetchone():
+                    st.error("❌ Duplicate submission detected!")
+                else:
+                    filename = f"{teacher}_{lab_name}_{student_id}_{datetime.datetime.now().strftime('%H%M%S')}.dat"
+                    filepath = os.path.join(UPLOAD_DIR, filename)
+                    with open(filepath, "wb") as f:
+                        f.write(file.read())
+                    c.execute("INSERT INTO submissions (teacher, lab_name, student_id, ip, filename, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
+                              (teacher, lab_name, student_id, ip, filename, str(datetime.datetime.now())))
+                    conn.commit()
+                    st.success("✅ File submitted successfully!")
         conn.close()
 
-# ===========================
-# MAIN APP
-# ===========================
+# ---------------- Main ----------------
 def main():
-    st.set_page_config("Lab Exam System", page_icon="🧪", layout="centered")
-    st.title("🧪 Lab Exam Management System")
+    st.title("💻 Secure Lab Exam System")
 
-    menu = ["Teacher Login", "Teacher Register", "Student Portal"]
-    choice = st.sidebar.selectbox("Navigation", menu)
+    if "page" not in st.session_state:
+        st.session_state["page"] = "home"
 
-    if choice == "Teacher Register":
+    menu = ["Home", "Teacher Login", "Teacher Register", "Student"]
+    choice = st.sidebar.radio("Navigation", menu)
+
+    if choice == "Teacher Login":
+        teacher_login()
+    elif choice == "Teacher Register":
         teacher_register()
-    elif choice == "Teacher Login":
-        if "logged_in" in st.session_state and st.session_state["logged_in"]:
-            teacher_dashboard()
-        else:
-            teacher_login()
-    elif choice == "Student Portal":
+    elif choice == "Student":
         student_portal()
+    elif choice == "Home":
+        st.markdown("### Welcome to the Lab Exam Management System")
+
+    if st.session_state.get("page") == "teacher_dashboard":
+        teacher_dashboard()
 
 if __name__ == "__main__":
     main()
