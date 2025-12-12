@@ -2,13 +2,17 @@ import streamlit as st
 from datetime import datetime, timedelta
 from pathlib import Path
 import os
-import zipfile
 import socket
+import zipfile
+
+# SQLAlchemy imports
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, Boolean
 from sqlalchemy.orm import sessionmaker, declarative_base, relationship
+
+# Password hashing
 from passlib.context import CryptContext
 
-# ----------- Config ----------------
+# ------------------ Config -------------------
 BASE_DIR = Path(__file__).parent
 DB_PATH = BASE_DIR / "exam_app.db"
 SUBMISSION_DIR = BASE_DIR / "submissions"
@@ -16,7 +20,7 @@ SUBMISSION_DIR.mkdir(exist_ok=True)
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-# ----------- Database Setup ------------
+# ------------------ Database Setup -------------------
 engine = create_engine(f"sqlite:///{DB_PATH}", connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
@@ -54,7 +58,8 @@ class Submission(Base):
 
 Base.metadata.create_all(engine)
 
-# ----------- Helpers --------------
+# ------------------ Helpers -------------------
+
 def hash_password(password: str) -> str:
     return pwd_context.hash(password[:72])
 
@@ -75,7 +80,8 @@ def save_uploaded_file(uploaded_file, dest_path: str):
     with open(dest_path, "wb") as f:
         f.write(uploaded_file.getbuffer())
 
-# ----------- Streamlit UI ------------
+# ------------------ Streamlit UI -------------------
+
 st.set_page_config(page_title="Offline LAN Exam System", layout="wide")
 st.title("Offline LAN Exam System")
 
@@ -164,13 +170,11 @@ if menu == "Teacher":
                     cols = st.columns(3)
                     if cols[0].button("Delete Exam", key=f"del_{e.id}"):
                         try:
-                            # delete submissions files
                             folder = SUBMISSION_DIR / e.exam_code
                             if folder.exists():
                                 for f in folder.iterdir():
                                     f.unlink()
                                 folder.rmdir()
-                            # delete db entries
                             db.query(Submission).filter(Submission.exam_id == e.id).delete()
                             db.delete(e)
                             db.commit()
@@ -260,7 +264,7 @@ elif menu == "Student":
 else:
     st.header("Admin / Info")
     st.write("How to run on LAN:")
-    st.code("streamlit run your_script.py --server.address=0.0.0.0 --server.port=8501")
+    st.code("streamlit run app.py --server.address=0.0.0.0 --server.port=8501")
     st.write("Then other devices on same LAN can access at: http://<server-ip>:8501")
     st.markdown("---")
     st.write("Notes:")
@@ -271,4 +275,3 @@ else:
 
 st.markdown("---")
 st.caption("Offline LAN Exam System - Streamlit (single file)")
-
