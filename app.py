@@ -5,14 +5,14 @@ import os
 import socket
 import zipfile
 
-# SQLAlchemy imports
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, Boolean
-from sqlalchemy.orm import sessionmaker, declarative_base, relationship
+# Explicit sqlalchemy imports to avoid import issues
+import sqlalchemy
+import sqlalchemy.orm
+from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
-# Password hashing
 from passlib.context import CryptContext
 
-# ------------------ Config -------------------
+# ---------------- Config ------------------
 BASE_DIR = Path(__file__).parent
 DB_PATH = BASE_DIR / "exam_app.db"
 SUBMISSION_DIR = BASE_DIR / "submissions"
@@ -20,46 +20,46 @@ SUBMISSION_DIR.mkdir(exist_ok=True)
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-# ------------------ Database Setup -------------------
-engine = create_engine(f"sqlite:///{DB_PATH}", connect_args={"check_same_thread": False})
-SessionLocal = sessionmaker(bind=engine)
+# -------------- Database Setup ---------------
+engine = sqlalchemy.create_engine(f"sqlite:///{DB_PATH}", connect_args={"check_same_thread": False})
 Base = declarative_base()
+SessionLocal = sessionmaker(bind=engine)
 
+# -------------- Models ----------------------
 class Teacher(Base):
     __tablename__ = "teachers"
-    id = Column(Integer, primary_key=True)
-    name = Column(String, nullable=False)
-    email = Column(String, unique=True, nullable=False)
-    password_hash = Column(String, nullable=False)
+    id = sqlalchemy.Column(sqlalchemy.Integer, primary_key=True)
+    name = sqlalchemy.Column(sqlalchemy.String, nullable=False)
+    email = sqlalchemy.Column(sqlalchemy.String, unique=True, nullable=False)
+    password_hash = sqlalchemy.Column(sqlalchemy.String, nullable=False)
     exams = relationship("Exam", back_populates="teacher")
 
 class Exam(Base):
     __tablename__ = "exams"
-    id = Column(Integer, primary_key=True)
-    teacher_id = Column(Integer, ForeignKey("teachers.id"))
-    exam_name = Column(String, nullable=False)
-    exam_code = Column(String, unique=True, nullable=False)
-    start_time = Column(DateTime, nullable=False)
-    end_time = Column(DateTime, nullable=False)
+    id = sqlalchemy.Column(sqlalchemy.Integer, primary_key=True)
+    teacher_id = sqlalchemy.Column(sqlalchemy.Integer, sqlalchemy.ForeignKey("teachers.id"))
+    exam_name = sqlalchemy.Column(sqlalchemy.String, nullable=False)
+    exam_code = sqlalchemy.Column(sqlalchemy.String, unique=True, nullable=False)
+    start_time = sqlalchemy.Column(sqlalchemy.DateTime, nullable=False)
+    end_time = sqlalchemy.Column(sqlalchemy.DateTime, nullable=False)
     teacher = relationship("Teacher", back_populates="exams")
     submissions = relationship("Submission", back_populates="exam")
 
 class Submission(Base):
     __tablename__ = "submissions"
-    id = Column(Integer, primary_key=True)
-    exam_id = Column(Integer, ForeignKey("exams.id"))
-    student_ip = Column(String, nullable=False)
-    student_name = Column(String, nullable=False)
-    roll_number = Column(String, nullable=False)
-    submitted_at = Column(DateTime, default=datetime.utcnow)
-    file_path = Column(String, nullable=False)
-    resubmission_used = Column(Boolean, default=False)
+    id = sqlalchemy.Column(sqlalchemy.Integer, primary_key=True)
+    exam_id = sqlalchemy.Column(sqlalchemy.Integer, sqlalchemy.ForeignKey("exams.id"))
+    student_ip = sqlalchemy.Column(sqlalchemy.String, nullable=False)
+    student_name = sqlalchemy.Column(sqlalchemy.String, nullable=False)
+    roll_number = sqlalchemy.Column(sqlalchemy.String, nullable=False)
+    submitted_at = sqlalchemy.Column(sqlalchemy.DateTime, default=datetime.utcnow)
+    file_path = sqlalchemy.Column(sqlalchemy.String, nullable=False)
+    resubmission_used = sqlalchemy.Column(sqlalchemy.Boolean, default=False)
     exam = relationship("Exam", back_populates="submissions")
 
 Base.metadata.create_all(engine)
 
-# ------------------ Helpers -------------------
-
+# ------------ Helper functions --------------
 def hash_password(password: str) -> str:
     return pwd_context.hash(password[:72])
 
@@ -80,8 +80,7 @@ def save_uploaded_file(uploaded_file, dest_path: str):
     with open(dest_path, "wb") as f:
         f.write(uploaded_file.getbuffer())
 
-# ------------------ Streamlit UI -------------------
-
+# ---------------- Streamlit UI ------------------
 st.set_page_config(page_title="Offline LAN Exam System", layout="wide")
 st.title("Offline LAN Exam System")
 
@@ -170,11 +169,13 @@ if menu == "Teacher":
                     cols = st.columns(3)
                     if cols[0].button("Delete Exam", key=f"del_{e.id}"):
                         try:
+                            # delete submissions files
                             folder = SUBMISSION_DIR / e.exam_code
                             if folder.exists():
                                 for f in folder.iterdir():
                                     f.unlink()
                                 folder.rmdir()
+                            # delete db entries
                             db.query(Submission).filter(Submission.exam_id == e.id).delete()
                             db.delete(e)
                             db.commit()
@@ -264,7 +265,7 @@ elif menu == "Student":
 else:
     st.header("Admin / Info")
     st.write("How to run on LAN:")
-    st.code("streamlit run app.py --server.address=0.0.0.0 --server.port=8501")
+    st.code("streamlit run your_script.py --server.address=0.0.0.0 --server.port=8501")
     st.write("Then other devices on same LAN can access at: http://<server-ip>:8501")
     st.markdown("---")
     st.write("Notes:")
