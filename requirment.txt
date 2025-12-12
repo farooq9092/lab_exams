@@ -1,1 +1,8 @@
 streamlit
+sqlalchemy
+bcrypt
+python-dotenv
+pandas
+python-multipart
+fastapi
+uvicorn
