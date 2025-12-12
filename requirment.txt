@@ -1,8 +1,4 @@
 streamlit
 sqlalchemy
-bcrypt
+passlib[bcrypt]
 python-dotenv
-pandas
-python-multipart
-fastapi
-uvicorn
