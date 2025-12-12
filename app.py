@@ -1,246 +1,331 @@
+"""
+Single-file Streamlit app for Offline LAN Exam System
+Features:
+- Teacher register / login (bcrypt hashed passwords)
+- Create / list / delete exams
+- Student submission with one-submission-per-IP restriction
+- File storage under ./submissions/<exam_code>/
+- Download submissions as ZIP by teacher
+- Run on LAN: streamlit run streamlit_app.py --server.address=0.0.0.0 --server.port=8501
+
+Notes:
+- Streamlit cannot reliably detect client IP from server side; students should enter their device IP in the form (auto-detect attempt included).
+- Configure sensible defaults in constants below.
+"""
+
 import streamlit as st
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, ForeignKey, Text
-from sqlalchemy.orm import declarative_base, sessionmaker, relationship
+from datetime import datetime, timedelta
+from pathlib import Path
+import os
+import zipfile
+import socket
+
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, Boolean
+from sqlalchemy.orm import sessionmaker, declarative_base, relationship
 from passlib.context import CryptContext
 
-# Password hashing setup
+# ----------------------
+# Configuration
+# ----------------------
+BASE_DIR = Path(__file__).resolve().parent
+DB_PATH = BASE_DIR / "exam_app_streamlit.db"
+SUBMISSION_DIR = BASE_DIR / "submissions"
+SUBMISSION_DIR.mkdir(exist_ok=True)
+
+# Streamlit server host/port instructions shown to user later
+
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-# DB setup
-engine = create_engine("sqlite:///exam_system.db", connect_args={"check_same_thread": False})
-SessionLocal = sessionmaker(bind=engine)
+# ----------------------
+# Database (SQLAlchemy)
+# ----------------------
+engine = create_engine(f"sqlite:///{DB_PATH}", connect_args={"check_same_thread": False})
+SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
 Base = declarative_base()
 
-# Database Models
-
-class User(Base):
-    __tablename__ = "users"
+class Teacher(Base):
+    __tablename__ = "teachers"
     id = Column(Integer, primary_key=True, index=True)
-    username = Column(String, unique=True, index=True)
-    hashed_password = Column(String)
-
-    exams = relationship("Exam", back_populates="owner")
-    attempts = relationship("ExamAttempt", back_populates="user")
+    name = Column(String)
+    email = Column(String, unique=True, index=True)
+    password_hash = Column(String)
+    exams = relationship('Exam', back_populates='teacher')
 
 class Exam(Base):
     __tablename__ = "exams"
     id = Column(Integer, primary_key=True, index=True)
-    title = Column(String)
-    description = Column(Text)
-    owner_id = Column(Integer, ForeignKey("users.id"))
+    teacher_id = Column(Integer, ForeignKey('teachers.id'))
+    exam_name = Column(String)
+    exam_code = Column(String, unique=True, index=True)
+    start_time = Column(DateTime)
+    end_time = Column(DateTime)
+    teacher = relationship('Teacher', back_populates='exams')
+    submissions = relationship('Submission', back_populates='exam')
 
-    owner = relationship("User", back_populates="exams")
-    questions = relationship("Question", back_populates="exam", cascade="all, delete")
-    attempts = relationship("ExamAttempt", back_populates="exam")
-
-class Question(Base):
-    __tablename__ = "questions"
+class Submission(Base):
+    __tablename__ = "submissions"
     id = Column(Integer, primary_key=True, index=True)
-    exam_id = Column(Integer, ForeignKey("exams.id"))
-    question_text = Column(Text)
-    option1 = Column(String)
-    option2 = Column(String)
-    option3 = Column(String)
-    option4 = Column(String)
-    correct_option = Column(Integer)  # 1 to 4
-
-    exam = relationship("Exam", back_populates="questions")
-
-class ExamAttempt(Base):
-    __tablename__ = "exam_attempts"
-    id = Column(Integer, primary_key=True, index=True)
-    exam_id = Column(Integer, ForeignKey("exams.id"))
-    user_id = Column(Integer, ForeignKey("users.id"))
-    score = Column(Integer)
-
-    exam = relationship("Exam", back_populates="attempts")
-    user = relationship("User", back_populates="attempts")
+    exam_id = Column(Integer, ForeignKey('exams.id'))
+    student_ip = Column(String)
+    student_name = Column(String)
+    roll_number = Column(String)
+    submitted_at = Column(DateTime, default=datetime.utcnow)
+    file_path = Column(String)
+    resubmission_used = Column(Boolean, default=False)
+    exam = relationship('Exam', back_populates='submissions')
 
 Base.metadata.create_all(bind=engine)
 
-# Helper Functions
+# ----------------------
+# Helpers
+# ----------------------
 
-def get_password_hash(password):
-    return pwd_context.hash(password)
+def hash_password(password: str) -> str:
+    return pwd_context.hash(password[:72])
 
-def verify_password(plain_password, hashed_password):
-    return pwd_context.verify(plain_password, hashed_password)
 
-def get_user(session, username):
-    return session.query(User).filter(User.username == username).first()
+def verify_password(plain: str, hashed: str) -> bool:
+    return pwd_context.verify(plain[:72], hashed)
 
-def authenticate_user(session, username, password):
-    user = get_user(session, username)
-    if not user:
-        return False
-    if not verify_password(password, user.hashed_password):
-        return False
-    return user
 
-# Streamlit App
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
-st.title("Offline LAN Exam System")
 
-# Initialize session state variables
-if "logged_in" not in st.session_state:
-    st.session_state.logged_in = False
-if "user" not in st.session_state:
-    st.session_state.user = None
+def try_detect_ip():
+    # Attempt to detect local IP address used on LAN
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # doesn't need to be reachable
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
 
-session = SessionLocal()
 
-def login():
-    st.subheader("Login")
-    username = st.text_input("Username")
-    password = st.text_input("Password", type="password")
-    if st.button("Login"):
-        user = authenticate_user(session, username, password)
-        if user:
-            st.session_state.logged_in = True
-            st.session_state.user = user
-            st.success(f"Welcome {username}!")
-        else:
-            st.error("Invalid username or password")
+def save_uploaded_file(uploaded_file, dest_path: str):
+    with open(dest_path, "wb") as f:
+        f.write(uploaded_file.getbuffer())
 
-def signup():
-    st.subheader("Sign Up")
-    new_username = st.text_input("Choose a username", key="signup_username")
-    new_password = st.text_input("Choose a password", type="password", key="signup_password")
-    if st.button("Register"):
-        existing_user = get_user(session, new_username)
-        if existing_user:
-            st.error("Username already exists. Please choose another.")
-        elif len(new_password) < 4:
-            st.error("Password too short. Minimum 4 characters.")
-        else:
-            user = User(username=new_username, hashed_password=get_password_hash(new_password))
-            session.add(user)
-            session.commit()
-            st.success("User created successfully. Please login.")
+# ----------------------
+# Streamlit UI
+# ----------------------
 
-def logout():
-    st.session_state.logged_in = False
-    st.session_state.user = None
-    st.success("Logged out successfully.")
+st.set_page_config(page_title="Offline Exam - Streamlit", layout="wide")
+st.title("Offline Exam System — Streamlit (LAN)")
 
-def create_exam():
-    st.subheader("Create a New Exam")
-    title = st.text_input("Exam Title")
-    description = st.text_area("Exam Description")
-    if st.button("Create Exam"):
-        if title.strip() == "":
-            st.error("Exam title is required.")
-            return
-        exam = Exam(title=title, description=description, owner_id=st.session_state.user.id)
-        session.add(exam)
-        session.commit()
-        st.success(f"Exam '{title}' created. You can now add questions.")
-        st.session_state.new_exam_id = exam.id
+menu = st.sidebar.selectbox("I am a", ["Teacher", "Student", "Admin / Info"])
 
-def add_questions(exam_id):
-    st.subheader("Add Questions to Exam")
-    exam = session.query(Exam).filter(Exam.id == exam_id).first()
-    if not exam:
-        st.error("Exam not found.")
-        return
+# ----------------------
+# Teacher area
+# ----------------------
+if menu == "Teacher":
+    st.header("Teacher Portal")
+    tab = st.sidebar.radio("Action", ["Login", "Register"])
 
-    question_text = st.text_area("Question Text")
-    option1 = st.text_input("Option 1")
-    option2 = st.text_input("Option 2")
-    option3 = st.text_input("Option 3")
-    option4 = st.text_input("Option 4")
-    correct_option = st.selectbox("Correct Option", options=[1, 2, 3, 4])
-
-    if st.button("Add Question"):
-        if not question_text or not option1 or not option2 or not option3 or not option4:
-            st.error("All question fields are required.")
-            return
-        question = Question(
-            exam_id=exam_id,
-            question_text=question_text,
-            option1=option1,
-            option2=option2,
-            option3=option3,
-            option4=option4,
-            correct_option=correct_option,
-        )
-        session.add(question)
-        session.commit()
-        st.success("Question added successfully.")
-
-def list_exams():
-    st.subheader("Available Exams")
-    exams = session.query(Exam).all()
-    for exam in exams:
-        st.markdown(f"### {exam.title}")
-        st.write(exam.description)
-        if st.button(f"Attempt Exam: {exam.title}", key=f"attempt_{exam.id}"):
-            st.session_state.attempt_exam_id = exam.id
-
-def attempt_exam(exam_id):
-    exam = session.query(Exam).filter(Exam.id == exam_id).first()
-    if not exam:
-        st.error("Exam not found.")
-        return
-
-    st.subheader(f"Attempting Exam: {exam.title}")
-    questions = exam.questions
-
-    answers = []
-    for q in questions:
-        answer = st.radio(q.question_text, options=[q.option1, q.option2, q.option3, q.option4], key=f"q_{q.id}")
-        answers.append((q, answer))
-
-    if st.button("Submit Exam"):
-        score = 0
-        for q, ans in answers:
-            correct_answer = getattr(q, f"option{q.correct_option}")
-            if ans == correct_answer:
-                score += 1
-        st.success(f"Your Score: {score} / {len(questions)}")
-
-        # Save attempt
-        attempt = ExamAttempt(exam_id=exam.id, user_id=st.session_state.user.id, score=score)
-        session.add(attempt)
-        session.commit()
-
-        # Reset attempt exam session state
-        del st.session_state.attempt_exam_id
-
-def main():
-    if not st.session_state.logged_in:
-        choice = st.sidebar.selectbox("Login or Sign Up", ["Login", "Sign Up"])
-        if choice == "Login":
-            login()
-        else:
-            signup()
-    else:
-        st.sidebar.write(f"Logged in as: {st.session_state.user.username}")
-        if st.sidebar.button("Logout"):
-            logout()
-
-        menu = st.sidebar.selectbox("Menu", ["Create Exam", "Add Questions", "Attempt Exam", "View Exams"])
-
-        if menu == "Create Exam":
-            create_exam()
-
-        elif menu == "Add Questions":
-            if "new_exam_id" in st.session_state:
-                add_questions(st.session_state.new_exam_id)
+    if tab == "Register":
+        st.subheader("Register as Teacher")
+        name = st.text_input("Full name")
+        email = st.text_input("Email")
+        password = st.text_input("Password", type="password")
+        if st.button("Register"):
+            if not (name and email and password):
+                st.error("Please provide name, email and password")
             else:
-                st.info("Please create an exam first.")
+                db = next(get_db())
+                exists = db.query(Teacher).filter(Teacher.email == email).first()
+                if exists:
+                    st.error("Email already registered")
+                else:
+                    t = Teacher(name=name, email=email, password_hash=hash_password(password))
+                    db.add(t)
+                    db.commit()
+                    db.refresh(t)
+                    st.success(f"Registered. Your teacher id: {t.id}")
 
-        elif menu == "Attempt Exam":
-            if "attempt_exam_id" in st.session_state:
-                attempt_exam(st.session_state.attempt_exam_id)
+    elif tab == "Login":
+        st.subheader("Teacher Login")
+        email = st.text_input("Email")
+        password = st.text_input("Password", type="password")
+        if st.button("Login"):
+            if not (email and password):
+                st.error("Provide email and password")
             else:
-                list_exams()
+                db = next(get_db())
+                t = db.query(Teacher).filter(Teacher.email == email).first()
+                if not t or not verify_password(password, t.password_hash):
+                    st.error("Invalid credentials")
+                else:
+                    st.success(f"Welcome {t.name}")
+                    st.session_state["teacher_id"] = t.id
+                    st.session_state["teacher_name"] = t.name
 
-        elif menu == "View Exams":
-            st.subheader("All Exams")
-            exams = session.query(Exam).all()
-            for exam in exams:
-                st.write(f"**{exam.title}** - Created by User ID: {exam.owner_id}")
+        # If logged in, show teacher dashboard
+        if st.session_state.get("teacher_id"):
+            teacher_id = st.session_state["teacher_id"]
+            st.markdown("---")
+            st.subheader("Create Exam")
+            exam_name = st.text_input("Exam name", key="exam_name")
+            exam_code = st.text_input("Exam code (unique)", key="exam_code")
+            start_time = st.datetime_input("Start time (UTC)", value=datetime.utcnow())
+            end_time = st.datetime_input("End time (UTC)", value=datetime.utcnow() + timedelta(hours=1))
+            if st.button("Create Exam"):
+                if not (exam_name and exam_code):
+                    st.error("Provide exam name and code")
+                else:
+                    db = next(get_db())
+                    exists = db.query(Exam).filter(Exam.exam_code == exam_code).first()
+                    if exists:
+                        st.error("Exam code already exists")
+                    else:
+                        ex = Exam(teacher_id=teacher_id, exam_name=exam_name, exam_code=exam_code,
+                                  start_time=start_time, end_time=end_time)
+                        db.add(ex)
+                        db.commit()
+                        db.refresh(ex)
+                        st.success(f"Exam created (id={ex.id})")
 
-if __name__ == "__main__":
-    main()
+            st.markdown("---")
+            st.subheader("Your Exams")
+            db = next(get_db())
+            exams = db.query(Exam).filter(Exam.teacher_id == teacher_id).all()
+            for e in exams:
+                with st.expander(f"{e.exam_name} — {e.exam_code} (id={e.id})"):
+                    st.write("Start:", e.start_time.isoformat() if e.start_time else "-")
+                    st.write("End:", e.end_time.isoformat() if e.end_time else "-")
+                    cols = st.columns(3)
+                    if cols[0].button("Delete exam", key=f"del_{e.id}"):
+                        # delete submissions records and files
+                        db2 = next(get_db())
+                        subs = db2.query(Submission).filter(Submission.exam_id == e.id).all()
+                        # delete DB rows
+                        try:
+                            db2.query(Submission).filter(Submission.exam_id == e.id).delete(synchronize_session=False)
+                            db2.delete(e)
+                            db2.commit()
+                        except Exception as ex_del:
+                            db2.rollback()
+                            st.error(f"Failed to delete exam: {ex_del}")
+                        else:
+                            # delete files on filesystem
+                            exam_folder = SUBMISSION_DIR / e.exam_code
+                            if exam_folder.exists():
+                                for fpath in exam_folder.glob("*"):
+                                    try:
+                                        fpath.unlink()
+                                    except Exception:
+                                        pass
+                                try:
+                                    exam_folder.rmdir()
+                                except Exception:
+                                    pass
+                            st.success("Exam and submissions deleted")
+                            st.experimental_rerun()
+
+                    if cols[1].button("View submissions", key=f"view_{e.id}"):
+                        db3 = next(get_db())
+                        subs = db3.query(Submission).filter(Submission.exam_id == e.id).all()
+                        if not subs:
+                            st.info("No submissions yet")
+                        else:
+                            for s in subs:
+                                st.write(f"{s.id} — {s.student_name} — {s.roll_number} — {s.student_ip} — {s.submitted_at}")
+                                dlc = st.columns([1,5])[0]
+                                if dlc.button("Download", key=f"dl_{s.id}"):
+                                    if s.file_path and os.path.exists(s.file_path):
+                                        with open(s.file_path, "rb") as fh:
+                                            data = fh.read()
+                                        st.download_button(label="Download file", data=data, file_name=os.path.basename(s.file_path))
+                                    else:
+                                        st.error("File missing on server")
+
+                    if cols[2].button("Download all as ZIP", key=f"zip_{e.id}"):
+                        db4 = next(get_db())
+                        subs = db4.query(Submission).filter(Submission.exam_id == e.id).all()
+                        if not subs:
+                            st.info("No submissions to zip")
+                        else:
+                            zip_dir = SUBMISSION_DIR / "zips"
+                            zip_dir.mkdir(exist_ok=True)
+                            zip_path = zip_dir / f"exam_{e.id}_all.zip"
+                            with zipfile.ZipFile(zip_path, "w") as zipf:
+                                for s in subs:
+                                    if s.file_path and os.path.exists(s.file_path):
+                                        zipf.write(s.file_path, os.path.basename(s.file_path))
+                            with open(zip_path, "rb") as fh:
+                                st.download_button("Download ZIP", fh, file_name=zip_path.name)
+
+# ----------------------
+# Student area
+# ----------------------
+elif menu == "Student":
+    st.header("Student Submission Portal")
+    st.info("Enter exam code, your name, roll number and upload your answer file.\nIf you know your device IP, enter it to ensure one-submission-per-device enforcement.")
+
+    with st.form("submit_form"):
+        exam_code = st.text_input("Exam code")
+        student_name = st.text_input("Your name")
+        roll_number = st.text_input("Roll number")
+        detected_ip = try_detect_ip()
+        st.write("Detected (server-sensed) LAN IP:", detected_ip)
+        student_ip = st.text_input("Your device IP (leave blank to use detected)", value="")
+        uploaded_file = st.file_uploader("Answer file (pdf / docx / images etc.)")
+        submitted = st.form_submit_button("Submit")
+
+    if submitted:
+        if not (exam_code and student_name and roll_number and uploaded_file):
+            st.error("All fields + file are required")
+        else:
+            client_ip = student_ip.strip() if student_ip.strip() else detected_ip
+            db = next(get_db())
+            exam = db.query(Exam).filter(Exam.exam_code == exam_code).first()
+            if not exam:
+                st.error("Invalid exam code")
+            else:
+                now = datetime.utcnow()
+                if now > exam.end_time:
+                    st.error("Exam time has ended. Submission refused.")
+                else:
+                    existing = db.query(Submission).filter(Submission.exam_id == exam.id, Submission.student_ip == client_ip).first()
+                    if existing:
+                        st.error("This device/IP has already submitted. Ask teacher to allow resubmission if needed.")
+                    else:
+                        safe_name = f"{roll_number}_{student_name}_{os.path.basename(uploaded_file.name)}".replace(" ", "_")
+                        folder = SUBMISSION_DIR / exam.exam_code
+                        folder.mkdir(parents=True, exist_ok=True)
+                        file_path = folder / safe_name
+                        try:
+                            save_uploaded_file(uploaded_file, str(file_path))
+                        except Exception as e:
+                            st.error(f"Failed to save file: {e}")
+                        else:
+                            sub = Submission(exam_id=exam.id, student_ip=client_ip, student_name=student_name,
+                                             roll_number=roll_number, file_path=str(file_path), submitted_at=datetime.utcnow())
+                            db.add(sub)
+                            db.commit()
+                            st.success("File submitted successfully")
+
+# ----------------------
+# Admin / Info
+# ----------------------
+else:
+    st.header("Admin / Run Info")
+    st.write("How to run on LAN:")
+    st.code("streamlit run streamlit_app.py --server.address=0.0.0.0 --server.port=8501")
+    st.write("Then other devices on the same LAN can open: http://<server-ip>:8501")
+    st.markdown("---")
+    st.write("Configuration & security notes:")
+    st.write("- This app stores data in a local SQLite file and files under ./submissions/. Make backups.")
+    st.write("- Streamlit by default runs over plain HTTP. For encrypted LAN traffic consider placing a reverse proxy with TLS on the server machine.")
+    st.write("- Teacher passwords are hashed with bcrypt.")
+    st.write("- Student IP detection is best-effort. Ask students to enter their device IP for reliable one-submission-per-device enforcement.")
+
+# Footer
+st.markdown("---")
+st.caption("Offline Exam System — Streamlit single-file prototype. Customize as needed.")
